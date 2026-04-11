@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::MutexGuard;
 use std::{fmt, io, ptr};
 
@@ -17,6 +18,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_MAXIMIZEBOX, WS_MINIMIZE, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_SIZEBOX,
     WS_SYSMENU, WS_VISIBLE,
 };
+use winit_core::event::FingerId;
 use winit_core::icon::Icon;
 use winit_core::keyboard::ModifiersState;
 use winit_core::monitor::Fullscreen;
@@ -28,6 +30,7 @@ use crate::{SelectedCursor, event_loop, util};
 #[derive(Debug)]
 pub(crate) struct WindowState {
     pub mouse: MouseProperties,
+    pub touch_gestures: TouchGestureState,
 
     /// Used by `WM_GETMINMAXINFO`.
     pub min_size: Option<Size>,
@@ -85,6 +88,20 @@ pub struct MouseProperties {
     pub capture_count: u32,
     cursor_flags: CursorFlags,
     pub last_position: Option<PhysicalPosition<f64>>,
+}
+
+#[derive(Debug, Default)]
+pub struct TouchGestureState {
+    contacts: BTreeMap<FingerId, PhysicalPosition<f64>>,
+    pan_active: bool,
+    last_pan_center: Option<PhysicalPosition<f64>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TouchPanTransition {
+    Started,
+    Moved(PhysicalPosition<f32>),
+    Ended,
 }
 
 bitflags! {
@@ -165,6 +182,7 @@ impl WindowState {
                 cursor_flags: CursorFlags::empty(),
                 last_position: None,
             },
+            touch_gestures: TouchGestureState::default(),
 
             min_size: attributes.min_surface_size,
             max_size: attributes.max_surface_size,
@@ -262,6 +280,71 @@ impl MouseProperties {
         }
 
         Ok(())
+    }
+}
+
+impl TouchGestureState {
+    pub fn begin_touch(&mut self, finger_id: FingerId, position: PhysicalPosition<f64>) {
+        self.contacts.insert(finger_id, position);
+        if self.pan_center().is_none() {
+            self.last_pan_center = None;
+            self.pan_active = false;
+        }
+    }
+
+    pub fn update_touch(
+        &mut self,
+        finger_id: FingerId,
+        position: PhysicalPosition<f64>,
+    ) -> Option<TouchPanTransition> {
+        self.contacts.insert(finger_id, position);
+        let current_center = self.pan_center()?;
+        if !self.pan_active {
+            self.pan_active = true;
+            self.last_pan_center = Some(current_center);
+            return Some(TouchPanTransition::Started);
+        }
+
+        let previous_center = self.last_pan_center.unwrap_or(current_center);
+        self.last_pan_center = Some(current_center);
+        Some(TouchPanTransition::Moved(PhysicalPosition::new(
+            (current_center.x - previous_center.x) as f32,
+            (current_center.y - previous_center.y) as f32,
+        )))
+    }
+
+    pub fn end_touch(&mut self, finger_id: FingerId) -> Option<TouchPanTransition> {
+        let was_pan_active = self.pan_active;
+        self.contacts.remove(&finger_id);
+        if self.contacts.len() >= 2 {
+            self.last_pan_center = self.pan_center();
+            return None;
+        }
+
+        self.last_pan_center = None;
+        self.pan_active = false;
+        was_pan_active.then_some(TouchPanTransition::Ended)
+    }
+
+    pub fn reset(&mut self) {
+        self.contacts.clear();
+        self.pan_active = false;
+        self.last_pan_center = None;
+    }
+
+    fn pan_center(&self) -> Option<PhysicalPosition<f64>> {
+        if self.contacts.len() < 2 {
+            return None;
+        }
+
+        let (sum_x, sum_y) = self
+            .contacts
+            .values()
+            .fold((0.0, 0.0), |(sum_x, sum_y), position| {
+                (sum_x + position.x, sum_y + position.y)
+            });
+        let count = self.contacts.len() as f64;
+        Some(PhysicalPosition::new(sum_x / count, sum_y / count))
     }
 }
 

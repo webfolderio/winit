@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, mem, ptr};
 
-use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND, NTSTATUS, POINT, RECT};
+use windows_sys::Win32::Foundation::{HMODULE, HWND, NTSTATUS, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, HMONITOR};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
@@ -240,12 +240,6 @@ pub type GetPointerFrameInfoHistory = unsafe extern "system" fn(
 ) -> BOOL;
 
 pub type SkipPointerFrameMessages = unsafe extern "system" fn(pointer_id: u32) -> BOOL;
-pub type GetPointerDeviceRects = unsafe extern "system" fn(
-    device: HANDLE,
-    pointer_device_rect: *mut RECT,
-    display_rect: *mut RECT,
-) -> BOOL;
-
 pub type GetPointerTouchInfo =
     unsafe extern "system" fn(pointer_id: u32, touch_info: *mut POINTER_TOUCH_INFO) -> BOOL;
 pub type GetPointerPenInfo =
@@ -298,12 +292,14 @@ pub(crate) static GET_POINTER_FRAME_INFO_HISTORY: LazyLock<Option<GetPointerFram
     LazyLock::new(|| get_function!("user32.dll", GetPointerFrameInfoHistory));
 pub(crate) static SKIP_POINTER_FRAME_MESSAGES: LazyLock<Option<SkipPointerFrameMessages>> =
     LazyLock::new(|| get_function!("user32.dll", SkipPointerFrameMessages));
-pub(crate) static GET_POINTER_DEVICE_RECTS: LazyLock<Option<GetPointerDeviceRects>> =
-    LazyLock::new(|| get_function!("user32.dll", GetPointerDeviceRects));
 pub(crate) static GET_POINTER_TOUCH_INFO: LazyLock<Option<GetPointerTouchInfo>> =
     LazyLock::new(|| get_function!("user32.dll", GetPointerTouchInfo));
 pub(crate) static GET_POINTER_PEN_INFO: LazyLock<Option<GetPointerPenInfo>> =
     LazyLock::new(|| get_function!("user32.dll", GetPointerPenInfo));
+
+pub(crate) fn has_pointer_frame_input_support() -> bool {
+    GET_POINTER_FRAME_INFO_HISTORY.is_some() && SKIP_POINTER_FRAME_MESSAGES.is_some()
+}
 
 pub(crate) fn wrap_device_id(id: u32) -> DeviceId {
     DeviceId::from_raw(id as i64)

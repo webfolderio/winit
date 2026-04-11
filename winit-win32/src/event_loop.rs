@@ -91,7 +91,9 @@ use crate::keyboard_layout::LAYOUT_CACHE;
 use crate::monitor::{self, MonitorHandle};
 use crate::util::{WIN10_BUILD_VERSION, wrap_device_id};
 use crate::window::{InitData, Window};
-use crate::window_state::{CursorFlags, ImeState, WindowFlags, WindowState};
+use crate::window_state::{
+    CursorFlags, ImeState, TouchPanTransition, WindowFlags, WindowState,
+};
 use crate::{raw_input, util};
 
 // This is defined in `winuser.h` as a macro that expands to `UINT_MAX`
@@ -955,7 +957,10 @@ unsafe fn gain_active_focus(window: HWND, userdata: &WindowData) {
 unsafe fn lose_active_focus(window: HWND, userdata: &WindowData) {
     use winit_core::event::WindowEvent::{Focused, ModifiersChanged};
 
-    userdata.window_state_lock().modifiers_state = ModifiersState::empty();
+    let mut window_state = userdata.window_state_lock();
+    window_state.modifiers_state = ModifiersState::empty();
+    window_state.touch_gestures.reset();
+    drop(window_state);
     userdata.send_window_event(window, ModifiersChanged(ModifiersState::empty().into()));
 
     userdata.send_window_event(window, Focused(false));
@@ -1841,8 +1846,14 @@ unsafe fn public_window_callback_inner(
             use winit_core::event::{PointerKind, PointerSource};
 
             let pcount = util::loword(wparam as u32) as usize;
-            let mut inputs = Vec::with_capacity(pcount);
             let htouch = lparam as *mut _;
+            if util::has_pointer_frame_input_support() {
+                unsafe { CloseTouchInputHandle(htouch) };
+                result = ProcResult::Value(0);
+                return;
+            }
+
+            let mut inputs = Vec::with_capacity(pcount);
             if unsafe {
                 GetTouchInputInfo(
                     htouch,
@@ -1914,14 +1925,9 @@ unsafe fn public_window_callback_inner(
             use winit_core::event::ElementState::{Pressed, Released};
             use winit_core::event::{ButtonSource, PointerKind, PointerSource};
 
-            if let (
-                Some(GetPointerFrameInfoHistory),
-                Some(SkipPointerFrameMessages),
-                Some(GetPointerDeviceRects),
-            ) = (
+            if let (Some(GetPointerFrameInfoHistory), Some(SkipPointerFrameMessages)) = (
                 *util::GET_POINTER_FRAME_INFO_HISTORY,
                 *util::SKIP_POINTER_FRAME_MESSAGES,
-                *util::GET_POINTER_DEVICE_RECTS,
             ) {
                 let pointer_id = util::loword(wparam as u32) as u32;
                 let mut entries_count = 0u32;
@@ -1955,52 +1961,21 @@ unsafe fn public_window_callback_inner(
                 }
                 unsafe { pointer_infos.set_len(pointer_info_count) };
 
+                let mut touch_pan_started = false;
+                let mut touch_pan_delta = PhysicalPosition::new(0.0f32, 0.0f32);
+                let mut touch_pan_ended = false;
+
                 // https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-getpointerframeinfohistory
                 // The information retrieved appears in reverse chronological order, with the most
                 // recent entry in the first row of the returned array
                 for pointer_info in pointer_infos.iter().rev() {
-                    let mut device_rect = mem::MaybeUninit::uninit();
-                    let mut display_rect = mem::MaybeUninit::uninit();
-
-                    if unsafe {
-                        GetPointerDeviceRects(
-                            pointer_info.sourceDevice,
-                            device_rect.as_mut_ptr(),
-                            display_rect.as_mut_ptr(),
-                        )
-                    } == false.into()
-                    {
-                        continue;
-                    }
-
-                    let device_rect = unsafe { device_rect.assume_init() };
-                    let display_rect = unsafe { display_rect.assume_init() };
-
-                    // For the most precise himetric to pixel conversion we calculate the ratio
-                    // between the resolution of the display device (pixel) and
-                    // the touch device (himetric).
-                    let himetric_to_pixel_ratio_x = (display_rect.right - display_rect.left) as f64
-                        / (device_rect.right - device_rect.left) as f64;
-                    let himetric_to_pixel_ratio_y = (display_rect.bottom - display_rect.top) as f64
-                        / (device_rect.bottom - device_rect.top) as f64;
-
-                    // ptHimetricLocation's origin is 0,0 even on multi-monitor setups.
-                    // On multi-monitor setups we need to translate the himetric location to the
-                    // rect of the display device it's attached to.
-                    let x = display_rect.left as f64
-                        + pointer_info.ptHimetricLocation.x as f64 * himetric_to_pixel_ratio_x;
-                    let y = display_rect.top as f64
-                        + pointer_info.ptHimetricLocation.y as f64 * himetric_to_pixel_ratio_y;
-
-                    let mut location = POINT { x: x.floor() as i32, y: y.floor() as i32 };
+                    let mut location = pointer_info.ptPixelLocation;
 
                     if unsafe { ScreenToClient(window, &mut location) } == false.into() {
                         continue;
                     }
 
-                    let x = location.x as f64 + x.fract();
-                    let y = location.y as f64 + y.fract();
-                    let position = PhysicalPosition::new(x, y);
+                    let position = PhysicalPosition::new(location.x as f64, location.y as f64);
 
                     let finger_id = FingerId::from_raw(pointer_info.pointerId as usize);
                     let primary = util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_PRIMARY);
@@ -2035,6 +2010,12 @@ unsafe fn public_window_callback_inner(
                         };
 
                         if is_down {
+                            if pointer_info.pointerType == PT_TOUCH {
+                                userdata
+                                    .window_state_lock()
+                                    .touch_gestures
+                                    .begin_touch(finger_id, position);
+                            }
                             userdata.send_window_event(window, WindowEvent::PointerEntered {
                                 device_id: None,
                                 primary,
@@ -2063,6 +2044,15 @@ unsafe fn public_window_callback_inner(
                                 position: Some(position),
                                 kind,
                             });
+                            if pointer_info.pointerType == PT_TOUCH {
+                                if let Some(TouchPanTransition::Ended) = userdata
+                                    .window_state_lock()
+                                    .touch_gestures
+                                    .end_touch(finger_id)
+                                {
+                                    touch_pan_ended = true;
+                                }
+                            }
                         }
                     } else if util::has_flag(pointer_info.pointerFlags, POINTER_FLAG_UPDATE) {
                         let source = match pointer_info.pointerType {
@@ -2077,6 +2067,25 @@ unsafe fn public_window_callback_inner(
                             _ => PointerSource::Unknown,
                         };
 
+                        if pointer_info.pointerType == PT_TOUCH {
+                            if let Some(transition) = userdata
+                                .window_state_lock()
+                                .touch_gestures
+                                .update_touch(finger_id, position)
+                            {
+                                match transition {
+                                    TouchPanTransition::Started => {
+                                        touch_pan_started = true;
+                                    }
+                                    TouchPanTransition::Moved(delta) => {
+                                        touch_pan_delta.x += delta.x;
+                                        touch_pan_delta.y += delta.y;
+                                    }
+                                    TouchPanTransition::Ended => {}
+                                }
+                            }
+                        }
+
                         userdata.send_window_event(window, WindowEvent::PointerMoved {
                             device_id: None,
                             primary,
@@ -2086,6 +2095,30 @@ unsafe fn public_window_callback_inner(
                     } else {
                         continue;
                     }
+                }
+
+                if touch_pan_started {
+                    userdata.send_window_event(window, WindowEvent::PanGesture {
+                        device_id: None,
+                        delta: PhysicalPosition::new(0.0, 0.0),
+                        phase: TouchPhase::Started,
+                    });
+                }
+
+                if touch_pan_delta.x != 0.0 || touch_pan_delta.y != 0.0 {
+                    userdata.send_window_event(window, WindowEvent::PanGesture {
+                        device_id: None,
+                        delta: touch_pan_delta,
+                        phase: TouchPhase::Moved,
+                    });
+                }
+
+                if touch_pan_ended {
+                    userdata.send_window_event(window, WindowEvent::PanGesture {
+                        device_id: None,
+                        delta: PhysicalPosition::new(0.0, 0.0),
+                        phase: TouchPhase::Ended,
+                    });
                 }
 
                 unsafe { SkipPointerFrameMessages(pointer_id) };

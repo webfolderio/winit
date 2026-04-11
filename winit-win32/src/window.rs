@@ -1175,7 +1175,7 @@ impl InitData<'_> {
         // Register for touch events if applicable
         {
             let digitizer = unsafe { GetSystemMetrics(SM_DIGITIZER) as u32 };
-            if digitizer & NID_READY != 0 {
+            if digitizer & NID_READY != 0 && !util::has_pointer_frame_input_support() {
                 unsafe { RegisterTouchWindow(window, TWF_WANTPALM) };
             }
         }
