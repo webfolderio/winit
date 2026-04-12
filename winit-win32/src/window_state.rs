@@ -93,14 +93,16 @@ pub struct MouseProperties {
 #[derive(Debug, Default)]
 pub struct TouchGestureState {
     contacts: BTreeMap<FingerId, PhysicalPosition<f64>>,
-    pan_active: bool,
+    gesture_active: bool,
     last_pan_center: Option<PhysicalPosition<f64>>,
+    pinch_base_span: Option<f64>,
+    last_pinch_scale: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TouchPanTransition {
+pub enum TouchGestureTransition {
     Started,
-    Moved(PhysicalPosition<f32>),
+    Moved { pan_delta: PhysicalPosition<f32>, pinch_delta: f64 },
     Ended,
 }
 
@@ -284,55 +286,90 @@ impl MouseProperties {
 }
 
 impl TouchGestureState {
-    pub fn begin_touch(&mut self, finger_id: FingerId, position: PhysicalPosition<f64>) {
+    pub fn begin_touch(
+        &mut self,
+        finger_id: FingerId,
+        position: PhysicalPosition<f64>,
+    ) -> Option<TouchGestureTransition> {
         self.contacts.insert(finger_id, position);
-        if self.pan_center().is_none() {
-            self.last_pan_center = None;
-            self.pan_active = false;
+        if self.contacts.len() < 2 {
+            self.clear_gesture_state();
+            return None;
         }
+
+        if self.gesture_active {
+            self.rebase_active_gesture();
+        }
+
+        None
     }
 
     pub fn update_touch(
         &mut self,
         finger_id: FingerId,
         position: PhysicalPosition<f64>,
-    ) -> Option<TouchPanTransition> {
+    ) -> Option<TouchGestureTransition> {
         self.contacts.insert(finger_id, position);
-        let current_center = self.pan_center()?;
-        if !self.pan_active {
-            self.pan_active = true;
+        let current_center = self.gesture_center()?;
+        let current_span = self.pinch_span(current_center)?;
+        if !self.gesture_active {
+            self.gesture_active = true;
             self.last_pan_center = Some(current_center);
-            return Some(TouchPanTransition::Started);
+            self.pinch_base_span = Some(current_span);
+            self.last_pinch_scale = 1.0;
+            return Some(TouchGestureTransition::Started);
         }
 
         let previous_center = self.last_pan_center.unwrap_or(current_center);
         self.last_pan_center = Some(current_center);
-        Some(TouchPanTransition::Moved(PhysicalPosition::new(
+        let pan_delta = PhysicalPosition::new(
             (current_center.x - previous_center.x) as f32,
             (current_center.y - previous_center.y) as f32,
-        )))
+        );
+        let base_span = self.pinch_base_span.unwrap_or(current_span).max(1.0);
+        let current_scale = current_span / base_span;
+        let pinch_delta = current_scale - self.last_pinch_scale;
+        self.last_pinch_scale = current_scale;
+        Some(TouchGestureTransition::Moved { pan_delta, pinch_delta })
     }
 
-    pub fn end_touch(&mut self, finger_id: FingerId) -> Option<TouchPanTransition> {
-        let was_pan_active = self.pan_active;
+    pub fn end_touch(&mut self, finger_id: FingerId) -> Option<TouchGestureTransition> {
+        let was_gesture_active = self.gesture_active;
         self.contacts.remove(&finger_id);
         if self.contacts.len() >= 2 {
-            self.last_pan_center = self.pan_center();
+            if was_gesture_active {
+                self.rebase_active_gesture();
+            }
             return None;
         }
 
-        self.last_pan_center = None;
-        self.pan_active = false;
-        was_pan_active.then_some(TouchPanTransition::Ended)
+        self.clear_gesture_state();
+        was_gesture_active.then_some(TouchGestureTransition::Ended)
     }
 
     pub fn reset(&mut self) {
         self.contacts.clear();
-        self.pan_active = false;
-        self.last_pan_center = None;
+        self.clear_gesture_state();
     }
 
-    fn pan_center(&self) -> Option<PhysicalPosition<f64>> {
+    fn clear_gesture_state(&mut self) {
+        self.gesture_active = false;
+        self.last_pan_center = None;
+        self.pinch_base_span = None;
+        self.last_pinch_scale = 1.0;
+    }
+
+    fn rebase_active_gesture(&mut self) {
+        let Some(center) = self.gesture_center() else {
+            self.clear_gesture_state();
+            return;
+        };
+        self.last_pan_center = Some(center);
+        self.pinch_base_span = self.pinch_span(center);
+        self.last_pinch_scale = 1.0;
+    }
+
+    fn gesture_center(&self) -> Option<PhysicalPosition<f64>> {
         if self.contacts.len() < 2 {
             return None;
         }
@@ -345,6 +382,24 @@ impl TouchGestureState {
             });
         let count = self.contacts.len() as f64;
         Some(PhysicalPosition::new(sum_x / count, sum_y / count))
+    }
+
+    fn pinch_span(&self, center: PhysicalPosition<f64>) -> Option<f64> {
+        if self.contacts.len() < 2 {
+            return None;
+        }
+
+        let span = self
+            .contacts
+            .values()
+            .map(|position| {
+                let dx = position.x - center.x;
+                let dy = position.y - center.y;
+                (dx * dx + dy * dy).sqrt()
+            })
+            .sum::<f64>()
+            / self.contacts.len() as f64;
+        Some(span.max(1.0))
     }
 }
 

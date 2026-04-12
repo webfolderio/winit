@@ -92,7 +92,7 @@ use crate::monitor::{self, MonitorHandle};
 use crate::util::{WIN10_BUILD_VERSION, wrap_device_id};
 use crate::window::{InitData, Window};
 use crate::window_state::{
-    CursorFlags, ImeState, TouchPanTransition, WindowFlags, WindowState,
+    CursorFlags, ImeState, TouchGestureTransition, WindowFlags, WindowState,
 };
 use crate::{raw_input, util};
 
@@ -1961,9 +1961,10 @@ unsafe fn public_window_callback_inner(
                 }
                 unsafe { pointer_infos.set_len(pointer_info_count) };
 
-                let mut touch_pan_started = false;
+                let mut touch_gesture_started = false;
                 let mut touch_pan_delta = PhysicalPosition::new(0.0f32, 0.0f32);
-                let mut touch_pan_ended = false;
+                let mut touch_pinch_delta = 0.0f64;
+                let mut touch_gesture_ended = false;
 
                 // https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-getpointerframeinfohistory
                 // The information retrieved appears in reverse chronological order, with the most
@@ -2011,10 +2012,13 @@ unsafe fn public_window_callback_inner(
 
                         if is_down {
                             if pointer_info.pointerType == PT_TOUCH {
-                                userdata
+                                if let Some(TouchGestureTransition::Ended) = userdata
                                     .window_state_lock()
                                     .touch_gestures
-                                    .begin_touch(finger_id, position);
+                                    .begin_touch(finger_id, position)
+                                {
+                                    touch_gesture_ended = true;
+                                }
                             }
                             userdata.send_window_event(window, WindowEvent::PointerEntered {
                                 device_id: None,
@@ -2045,12 +2049,12 @@ unsafe fn public_window_callback_inner(
                                 kind,
                             });
                             if pointer_info.pointerType == PT_TOUCH {
-                                if let Some(TouchPanTransition::Ended) = userdata
+                                if let Some(TouchGestureTransition::Ended) = userdata
                                     .window_state_lock()
                                     .touch_gestures
                                     .end_touch(finger_id)
                                 {
-                                    touch_pan_ended = true;
+                                    touch_gesture_ended = true;
                                 }
                             }
                         }
@@ -2074,14 +2078,20 @@ unsafe fn public_window_callback_inner(
                                 .update_touch(finger_id, position)
                             {
                                 match transition {
-                                    TouchPanTransition::Started => {
-                                        touch_pan_started = true;
+                                    TouchGestureTransition::Started => {
+                                        touch_gesture_started = true;
                                     }
-                                    TouchPanTransition::Moved(delta) => {
-                                        touch_pan_delta.x += delta.x;
-                                        touch_pan_delta.y += delta.y;
+                                    TouchGestureTransition::Moved {
+                                        pan_delta,
+                                        pinch_delta,
+                                    } => {
+                                        touch_pan_delta.x += pan_delta.x;
+                                        touch_pan_delta.y += pan_delta.y;
+                                        touch_pinch_delta += pinch_delta;
                                     }
-                                    TouchPanTransition::Ended => {}
+                                    TouchGestureTransition::Ended => {
+                                        touch_gesture_ended = true;
+                                    }
                                 }
                             }
                         }
@@ -2097,10 +2107,15 @@ unsafe fn public_window_callback_inner(
                     }
                 }
 
-                if touch_pan_started {
+                if touch_gesture_started {
                     userdata.send_window_event(window, WindowEvent::PanGesture {
                         device_id: None,
                         delta: PhysicalPosition::new(0.0, 0.0),
+                        phase: TouchPhase::Started,
+                    });
+                    userdata.send_window_event(window, WindowEvent::PinchGesture {
+                        device_id: None,
+                        delta: 0.0,
                         phase: TouchPhase::Started,
                     });
                 }
@@ -2113,10 +2128,23 @@ unsafe fn public_window_callback_inner(
                     });
                 }
 
-                if touch_pan_ended {
+                if touch_pinch_delta != 0.0 {
+                    userdata.send_window_event(window, WindowEvent::PinchGesture {
+                        device_id: None,
+                        delta: touch_pinch_delta,
+                        phase: TouchPhase::Moved,
+                    });
+                }
+
+                if touch_gesture_ended {
                     userdata.send_window_event(window, WindowEvent::PanGesture {
                         device_id: None,
                         delta: PhysicalPosition::new(0.0, 0.0),
+                        phase: TouchPhase::Ended,
+                    });
+                    userdata.send_window_event(window, WindowEvent::PinchGesture {
+                        device_id: None,
+                        delta: 0.0,
                         phase: TouchPhase::Ended,
                     });
                 }
