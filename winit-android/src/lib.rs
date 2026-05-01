@@ -100,6 +100,8 @@ pub trait WindowExtAndroid {
     fn content_rect(&self) -> Rect;
 
     fn config(&self) -> ConfigurationRef;
+
+    fn android_app(&self) -> AndroidApp;
 }
 
 impl WindowExtAndroid for dyn CoreWindow + '_ {
@@ -111,6 +113,11 @@ impl WindowExtAndroid for dyn CoreWindow + '_ {
     fn config(&self) -> ConfigurationRef {
         let window = self.cast_ref::<Window>().unwrap();
         window.config()
+    }
+
+    fn android_app(&self) -> AndroidApp {
+        let window = self.cast_ref::<Window>().unwrap();
+        window.android_app()
     }
 }
 

@@ -1,11 +1,14 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
+use android_activity::input::{
+    Axis, Button, InputEvent, KeyAction, Keycode, MotionAction, Source, ToolType,
+};
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
 };
@@ -20,6 +23,10 @@ use winit_core::event_loop::{
     ActiveEventLoop as RootActiveEventLoop, ControlFlow, DeviceEvents,
     EventLoopProxy as CoreEventLoopProxy, EventLoopProxyProvider,
     OwnedDisplayHandle as CoreOwnedDisplayHandle,
+};
+#[cfg(feature = "game-activity")]
+use winit_core::keyboard::{
+    Key as CoreKey, KeyCode as CoreKeyCode, KeyLocation, NamedKey, PhysicalKey,
 };
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
 use winit_core::window::{
@@ -98,6 +105,39 @@ impl RedrawRequester {
     }
 }
 
+const DOUBLE_TAP_TIMEOUT_NS: i64 = 300_000_000;
+const TAP_SLOP_PX: f64 = 48.0;
+
+#[derive(Clone, Copy, Debug)]
+struct TouchContact {
+    start_position: PhysicalPosition<f64>,
+    position: PhysicalPosition<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TouchGestureState {
+    pan_active: bool,
+    transform_active: bool,
+    centroid: Option<PhysicalPosition<f64>>,
+    span: Option<f64>,
+    angle_deg: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TapRecord {
+    device_id: Option<DeviceId>,
+    position: PhysicalPosition<f64>,
+    time_ns: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TouchSnapshot {
+    count: usize,
+    centroid: PhysicalPosition<f64>,
+    span: Option<f64>,
+    angle_deg: Option<f64>,
+}
+
 #[derive(Debug)]
 pub struct EventLoop {
     pub android_app: AndroidApp,
@@ -108,6 +148,9 @@ pub struct EventLoop {
     pending_redraw: bool,
     cause: StartCause,
     primary_pointer: Option<FingerId>,
+    touch_contacts: HashMap<FingerId, TouchContact>,
+    touch_gestures: TouchGestureState,
+    last_tap: Option<TapRecord>,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
 }
@@ -147,6 +190,9 @@ impl EventLoop {
         Ok(Self {
             android_app: android_app.clone(),
             primary_pointer: None,
+            touch_contacts: HashMap::new(),
+            touch_gestures: TouchGestureState::default(),
+            last_tap: None,
             window_target: ActiveEventLoop {
                 app: android_app.clone(),
                 control_flow: Cell::new(ControlFlow::default()),
@@ -323,130 +369,33 @@ impl EventLoop {
             InputEvent::MotionEvent(motion_event) => {
                 let device_id = Some(DeviceId::from_raw(motion_event.device_id() as i64));
                 let action = motion_event.action();
+                trace!("Input event {device_id:?}, {action:?}, source={:?}", motion_event.source());
 
-                let pointers: Option<
-                    Box<dyn Iterator<Item = android_activity::input::Pointer<'_>>>,
-                > = match action {
-                    MotionAction::Down
-                    | MotionAction::PointerDown
-                    | MotionAction::Up
-                    | MotionAction::PointerUp => Some(Box::new(std::iter::once(
-                        motion_event.pointer_at_index(motion_event.pointer_index()),
-                    ))),
-                    MotionAction::Move | MotionAction::Cancel => {
-                        Some(Box::new(motion_event.pointers()))
+                match action {
+                    MotionAction::Down | MotionAction::PointerDown => {
+                        self.handle_contact_down(motion_event, device_id, action, app);
                     },
-                    // TODO mouse events
-                    _ => None,
-                };
-
-                for pointer in pointers.into_iter().flatten() {
-                    let tool_type = pointer.tool_type();
-                    let position = PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
-                    trace!(
-                        "Input event {device_id:?}, {action:?}, loc={position:?}, \
-                         pointer={pointer:?}, tool_type={tool_type:?}"
-                    );
-                    let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
-                    let force = Some(Force::Normalized(pointer.pressure() as f64));
-
-                    match action {
-                        MotionAction::Down | MotionAction::PointerDown => {
-                            let primary = action == MotionAction::Down;
-                            if primary {
-                                self.primary_pointer = Some(finger_id);
-                            }
-                            let event = event::WindowEvent::PointerEntered {
-                                device_id,
-                                primary,
-                                position,
-                                kind: match tool_type {
-                                    android_activity::input::ToolType::Finger => {
-                                        event::PointerKind::Touch(finger_id)
-                                    },
-                                    // TODO mouse events
-                                    android_activity::input::ToolType::Mouse => continue,
-                                    _ => event::PointerKind::Unknown,
-                                },
-                            };
-                            app.window_event(&self.window_target, GLOBAL_WINDOW, event);
-                            let event = event::WindowEvent::PointerButton {
-                                device_id,
-                                primary,
-                                state: event::ElementState::Pressed,
-                                position,
-                                button: match tool_type {
-                                    android_activity::input::ToolType::Finger => {
-                                        event::ButtonSource::Touch { finger_id, force }
-                                    },
-                                    // TODO mouse events
-                                    android_activity::input::ToolType::Mouse => continue,
-                                    _ => event::ButtonSource::Unknown(0),
-                                },
-                            };
-                            app.window_event(&self.window_target, GLOBAL_WINDOW, event);
-                        },
-                        MotionAction::Move => {
-                            let primary = self.primary_pointer == Some(finger_id);
-                            let event = event::WindowEvent::PointerMoved {
-                                device_id,
-                                primary,
-                                position,
-                                source: match tool_type {
-                                    android_activity::input::ToolType::Finger => {
-                                        event::PointerSource::Touch { finger_id, force }
-                                    },
-                                    // TODO mouse events
-                                    android_activity::input::ToolType::Mouse => continue,
-                                    _ => event::PointerSource::Unknown,
-                                },
-                            };
-                            app.window_event(&self.window_target, GLOBAL_WINDOW, event);
-                        },
-                        MotionAction::Up | MotionAction::PointerUp | MotionAction::Cancel => {
-                            let primary = action == MotionAction::Up
-                                || (action == MotionAction::Cancel
-                                    && self.primary_pointer == Some(finger_id));
-
-                            if primary {
-                                self.primary_pointer = None;
-                            }
-
-                            if let MotionAction::Up | MotionAction::PointerUp = action {
-                                let event = event::WindowEvent::PointerButton {
-                                    device_id,
-                                    primary,
-                                    state: event::ElementState::Released,
-                                    position,
-                                    button: match tool_type {
-                                        android_activity::input::ToolType::Finger => {
-                                            event::ButtonSource::Touch { finger_id, force }
-                                        },
-                                        // TODO mouse events
-                                        android_activity::input::ToolType::Mouse => continue,
-                                        _ => event::ButtonSource::Unknown(0),
-                                    },
-                                };
-                                app.window_event(&self.window_target, GLOBAL_WINDOW, event);
-                            }
-
-                            let event = event::WindowEvent::PointerLeft {
-                                device_id,
-                                primary,
-                                position: Some(position),
-                                kind: match tool_type {
-                                    android_activity::input::ToolType::Finger => {
-                                        event::PointerKind::Touch(finger_id)
-                                    },
-                                    // TODO mouse events
-                                    android_activity::input::ToolType::Mouse => continue,
-                                    _ => event::PointerKind::Unknown,
-                                },
-                            };
-                            app.window_event(&self.window_target, GLOBAL_WINDOW, event);
-                        },
-                        _ => unreachable!(),
-                    }
+                    MotionAction::Move => {
+                        self.handle_motion_move(motion_event, device_id, app);
+                    },
+                    MotionAction::Up | MotionAction::PointerUp => {
+                        self.handle_contact_up(motion_event, device_id, action, app);
+                    },
+                    MotionAction::Cancel => {
+                        self.handle_motion_cancel(motion_event, device_id, app);
+                    },
+                    MotionAction::HoverEnter
+                    | MotionAction::HoverMove
+                    | MotionAction::HoverExit => {
+                        self.handle_hover_event(motion_event, device_id, action, app);
+                    },
+                    MotionAction::Scroll => {
+                        self.handle_scroll_event(motion_event, device_id, app);
+                    },
+                    MotionAction::ButtonPress | MotionAction::ButtonRelease => {
+                        self.handle_button_event(motion_event, device_id, action, app);
+                    },
+                    _ => {},
                 }
             },
             InputEvent::KeyEvent(key) => {
@@ -499,12 +448,599 @@ impl EventLoop {
                     },
                 }
             },
+            #[cfg(feature = "game-activity")]
+            InputEvent::TextEvent(state) => {
+                if let Some((preedit, cursor)) = self.ime_preedit_from_state(state) {
+                    app.window_event(
+                        &self.window_target,
+                        GLOBAL_WINDOW,
+                        event::WindowEvent::Ime(event::Ime::Preedit(preedit, cursor)),
+                    );
+                } else {
+                    let text = state.text.clone();
+                    if !text.is_empty() {
+                        app.window_event(
+                            &self.window_target,
+                            GLOBAL_WINDOW,
+                            event::WindowEvent::Ime(event::Ime::Preedit(String::new(), None)),
+                        );
+                        app.window_event(
+                            &self.window_target,
+                            GLOBAL_WINDOW,
+                            event::WindowEvent::Ime(event::Ime::Commit(text)),
+                        );
+                        android_app.set_text_input_state(
+                            android_activity::input::TextInputState::default(),
+                        );
+                    }
+                }
+            },
+            #[cfg(feature = "game-activity")]
+            InputEvent::TextAction(action) => {
+                if let Some(event) = self.text_action_keyboard_event(*action) {
+                    app.window_event(&self.window_target, GLOBAL_WINDOW, event);
+                }
+            },
             _ => {
                 warn!("Unknown android_activity input event {event:?}")
             },
         }
 
         input_status
+    }
+
+    #[cfg(feature = "game-activity")]
+    fn ime_preedit_from_state(
+        &self,
+        state: &android_activity::input::TextInputState,
+    ) -> Option<(String, Option<(usize, usize)>)> {
+        let span = state.compose_region?;
+        if span.start >= span.end || span.end > state.text.len() {
+            return None;
+        }
+
+        let preedit = state.text.get(span.start..span.end)?.to_string();
+        if preedit.is_empty() {
+            return None;
+        }
+
+        let selection = state.selection.start.min(state.selection.end);
+        let cursor = if (span.start..=span.end).contains(&selection) {
+            selection.saturating_sub(span.start)
+        } else {
+            preedit.len()
+        };
+        Some((preedit, Some((cursor, cursor))))
+    }
+
+    #[cfg(feature = "game-activity")]
+    fn text_action_keyboard_event(
+        &self,
+        action: android_activity::input::TextInputAction,
+    ) -> Option<event::WindowEvent> {
+        let (logical_key, physical_key, key_without_modifiers) = match action {
+            android_activity::input::TextInputAction::Unspecified
+            | android_activity::input::TextInputAction::None
+            | android_activity::input::TextInputAction::Go
+            | android_activity::input::TextInputAction::Search
+            | android_activity::input::TextInputAction::Send
+            | android_activity::input::TextInputAction::Done => (
+                CoreKey::Named(NamedKey::Enter),
+                PhysicalKey::Code(CoreKeyCode::Enter),
+                CoreKey::Named(NamedKey::Enter),
+            ),
+            android_activity::input::TextInputAction::Next => (
+                CoreKey::Named(NamedKey::Tab),
+                PhysicalKey::Code(CoreKeyCode::Tab),
+                CoreKey::Named(NamedKey::Tab),
+            ),
+            _ => return None,
+        };
+
+        Some(event::WindowEvent::KeyboardInput {
+            device_id: None,
+            event: event::KeyEvent {
+                state: event::ElementState::Pressed,
+                physical_key,
+                logical_key,
+                location: KeyLocation::Standard,
+                repeat: false,
+                text: None,
+                text_with_all_modifiers: None,
+                key_without_modifiers,
+            },
+            is_synthetic: false,
+        })
+    }
+
+    fn handle_contact_down<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        action: MotionAction,
+        app: &mut A,
+    ) {
+        let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
+        let position = pointer_position(&pointer);
+        let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+        let Some(pointer_state) =
+            android_pointer_state(motion_event.source(), pointer.tool_type(), finger_id, &pointer)
+        else {
+            return;
+        };
+
+        let primary = match pointer_state.kind {
+            event::PointerKind::Touch(_) => {
+                let primary = action == MotionAction::Down;
+                if primary {
+                    self.primary_pointer = Some(finger_id);
+                    self.maybe_emit_double_tap(device_id, position, motion_event.event_time(), app);
+                }
+                self.touch_contacts
+                    .insert(finger_id, TouchContact { start_position: position, position });
+                primary
+            },
+            _ => true,
+        };
+
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerEntered {
+                device_id,
+                primary,
+                position,
+                kind: pointer_state.kind,
+            },
+        );
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerButton {
+                device_id,
+                primary,
+                state: event::ElementState::Pressed,
+                position,
+                button: pointer_state.contact_button(),
+            },
+        );
+
+        if matches!(pointer_state.kind, event::PointerKind::Touch(_)) {
+            self.sync_touch_gestures(device_id, false, false, app);
+        }
+    }
+
+    fn handle_motion_move<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        app: &mut A,
+    ) {
+        let mut touched = false;
+
+        for pointer in motion_event.pointers() {
+            let position = pointer_position(&pointer);
+            let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+            let Some(pointer_state) = android_pointer_state(
+                motion_event.source(),
+                pointer.tool_type(),
+                finger_id,
+                &pointer,
+            ) else {
+                continue;
+            };
+
+            if matches!(pointer_state.kind, event::PointerKind::Touch(_)) {
+                if let Some(contact) = self.touch_contacts.get_mut(&finger_id) {
+                    contact.position = position;
+                } else {
+                    self.touch_contacts
+                        .insert(finger_id, TouchContact { start_position: position, position });
+                }
+                touched = true;
+            }
+
+            let primary = match pointer_state.kind {
+                event::PointerKind::Touch(_) => self.primary_pointer == Some(finger_id),
+                _ => true,
+            };
+
+            self.emit_window_event(
+                app,
+                event::WindowEvent::PointerMoved {
+                    device_id,
+                    primary,
+                    position,
+                    source: pointer_state.pointer_source(),
+                },
+            );
+        }
+
+        if touched {
+            self.sync_touch_gestures(device_id, true, false, app);
+        }
+    }
+
+    fn handle_contact_up<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        action: MotionAction,
+        app: &mut A,
+    ) {
+        let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
+        let position = pointer_position(&pointer);
+        let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+        let Some(pointer_state) =
+            android_pointer_state(motion_event.source(), pointer.tool_type(), finger_id, &pointer)
+        else {
+            return;
+        };
+
+        let primary = match pointer_state.kind {
+            event::PointerKind::Touch(_) => {
+                let primary = action == MotionAction::Up || self.primary_pointer == Some(finger_id);
+                if primary {
+                    self.primary_pointer = None;
+                }
+                if self.touch_contacts.len() == 1 {
+                    self.record_tap(device_id, finger_id, position, motion_event.event_time());
+                }
+                self.touch_contacts.remove(&finger_id);
+                primary
+            },
+            _ => true,
+        };
+
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerButton {
+                device_id,
+                primary,
+                state: event::ElementState::Released,
+                position,
+                button: pointer_state.contact_button(),
+            },
+        );
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerLeft {
+                device_id,
+                primary,
+                position: Some(position),
+                kind: pointer_state.kind,
+            },
+        );
+
+        if matches!(pointer_state.kind, event::PointerKind::Touch(_)) {
+            self.sync_touch_gestures(device_id, false, false, app);
+        }
+    }
+
+    fn handle_motion_cancel<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        app: &mut A,
+    ) {
+        let mut touched = false;
+
+        for pointer in motion_event.pointers() {
+            let position = pointer_position(&pointer);
+            let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+            let Some(pointer_state) = android_pointer_state(
+                motion_event.source(),
+                pointer.tool_type(),
+                finger_id,
+                &pointer,
+            ) else {
+                continue;
+            };
+
+            let primary = match pointer_state.kind {
+                event::PointerKind::Touch(_) => {
+                    let primary = self.primary_pointer == Some(finger_id);
+                    self.touch_contacts.remove(&finger_id);
+                    touched = true;
+                    primary
+                },
+                _ => true,
+            };
+
+            self.emit_window_event(
+                app,
+                event::WindowEvent::PointerLeft {
+                    device_id,
+                    primary,
+                    position: Some(position),
+                    kind: pointer_state.kind,
+                },
+            );
+        }
+
+        self.primary_pointer = None;
+        if touched {
+            self.sync_touch_gestures(device_id, false, true, app);
+        }
+    }
+
+    fn handle_hover_event<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        action: MotionAction,
+        app: &mut A,
+    ) {
+        let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
+        let position = pointer_position(&pointer);
+        let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+        let Some(pointer_state) =
+            android_pointer_state(motion_event.source(), pointer.tool_type(), finger_id, &pointer)
+        else {
+            return;
+        };
+
+        match action {
+            MotionAction::HoverEnter => self.emit_window_event(
+                app,
+                event::WindowEvent::PointerEntered {
+                    device_id,
+                    primary: true,
+                    position,
+                    kind: pointer_state.kind,
+                },
+            ),
+            MotionAction::HoverMove => self.emit_window_event(
+                app,
+                event::WindowEvent::PointerMoved {
+                    device_id,
+                    primary: true,
+                    position,
+                    source: pointer_state.pointer_source(),
+                },
+            ),
+            MotionAction::HoverExit => self.emit_window_event(
+                app,
+                event::WindowEvent::PointerLeft {
+                    device_id,
+                    primary: true,
+                    position: Some(position),
+                    kind: pointer_state.kind,
+                },
+            ),
+            _ => {},
+        }
+    }
+
+    fn handle_scroll_event<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        app: &mut A,
+    ) {
+        let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
+        let position = pointer_position(&pointer);
+        let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+        let Some(pointer_state) =
+            android_pointer_state(motion_event.source(), pointer.tool_type(), finger_id, &pointer)
+        else {
+            return;
+        };
+
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerMoved {
+                device_id,
+                primary: true,
+                position,
+                source: pointer_state.pointer_source(),
+            },
+        );
+
+        let delta = event::MouseScrollDelta::LineDelta(
+            -pointer.axis_value(Axis::Hscroll),
+            -pointer.axis_value(Axis::Vscroll),
+        );
+        self.emit_window_event(
+            app,
+            event::WindowEvent::MouseWheel { device_id, delta, phase: event::TouchPhase::Moved },
+        );
+    }
+
+    fn handle_button_event<A: ApplicationHandler>(
+        &mut self,
+        motion_event: &android_activity::input::MotionEvent<'_>,
+        device_id: Option<DeviceId>,
+        action: MotionAction,
+        app: &mut A,
+    ) {
+        let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
+        let position = pointer_position(&pointer);
+        let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
+        let Some(pointer_state) =
+            android_pointer_state(motion_event.source(), pointer.tool_type(), finger_id, &pointer)
+        else {
+            return;
+        };
+
+        let state = match action {
+            MotionAction::ButtonPress => event::ElementState::Pressed,
+            MotionAction::ButtonRelease => event::ElementState::Released,
+            _ => return,
+        };
+
+        let Some(button) = action_button_source(motion_event.action_button(), &pointer_state)
+        else {
+            return;
+        };
+
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerButton { device_id, primary: true, state, position, button },
+        );
+    }
+
+    fn emit_window_event<A: ApplicationHandler>(&self, app: &mut A, event: event::WindowEvent) {
+        app.window_event(&self.window_target, GLOBAL_WINDOW, event);
+    }
+
+    fn sync_touch_gestures<A: ApplicationHandler>(
+        &mut self,
+        device_id: Option<DeviceId>,
+        allow_move: bool,
+        cancelled: bool,
+        app: &mut A,
+    ) {
+        let snapshot = touch_snapshot(&self.touch_contacts);
+        let phase_end =
+            if cancelled { event::TouchPhase::Cancelled } else { event::TouchPhase::Ended };
+
+        let pan_should_be_active = snapshot.as_ref().is_some_and(|snapshot| snapshot.count >= 2);
+        if !self.touch_gestures.pan_active && pan_should_be_active {
+            self.touch_gestures.pan_active = true;
+            self.emit_window_event(
+                app,
+                event::WindowEvent::PanGesture {
+                    device_id,
+                    delta: PhysicalPosition::new(0.0, 0.0),
+                    phase: event::TouchPhase::Started,
+                },
+            );
+        } else if self.touch_gestures.pan_active && !pan_should_be_active {
+            self.touch_gestures.pan_active = false;
+            self.emit_window_event(
+                app,
+                event::WindowEvent::PanGesture {
+                    device_id,
+                    delta: PhysicalPosition::new(0.0, 0.0),
+                    phase: phase_end,
+                },
+            );
+        }
+
+        let transform_should_be_active =
+            snapshot.as_ref().is_some_and(|snapshot| snapshot.count == 2);
+        if !self.touch_gestures.transform_active && transform_should_be_active {
+            self.touch_gestures.transform_active = true;
+            self.emit_window_event(
+                app,
+                event::WindowEvent::PinchGesture {
+                    device_id,
+                    delta: 0.0,
+                    phase: event::TouchPhase::Started,
+                },
+            );
+            self.emit_window_event(
+                app,
+                event::WindowEvent::RotationGesture {
+                    device_id,
+                    delta: 0.0,
+                    phase: event::TouchPhase::Started,
+                },
+            );
+        } else if self.touch_gestures.transform_active && !transform_should_be_active {
+            self.touch_gestures.transform_active = false;
+            self.emit_window_event(
+                app,
+                event::WindowEvent::PinchGesture { device_id, delta: 0.0, phase: phase_end },
+            );
+            self.emit_window_event(
+                app,
+                event::WindowEvent::RotationGesture { device_id, delta: 0.0, phase: phase_end },
+            );
+        }
+
+        if allow_move {
+            if let Some(snapshot) = snapshot {
+                if self.touch_gestures.pan_active {
+                    if let Some(previous_centroid) = self.touch_gestures.centroid {
+                        let delta = PhysicalPosition::new(
+                            (snapshot.centroid.x - previous_centroid.x) as f32,
+                            (snapshot.centroid.y - previous_centroid.y) as f32,
+                        );
+                        self.emit_window_event(
+                            app,
+                            event::WindowEvent::PanGesture {
+                                device_id,
+                                delta,
+                                phase: event::TouchPhase::Moved,
+                            },
+                        );
+                    }
+                }
+
+                if self.touch_gestures.transform_active {
+                    if let (Some(previous_span), Some(span)) =
+                        (self.touch_gestures.span, snapshot.span)
+                    {
+                        let delta = if previous_span.abs() > f64::EPSILON {
+                            span / previous_span - 1.0
+                        } else {
+                            0.0
+                        };
+                        self.emit_window_event(
+                            app,
+                            event::WindowEvent::PinchGesture {
+                                device_id,
+                                delta,
+                                phase: event::TouchPhase::Moved,
+                            },
+                        );
+                    }
+
+                    if let (Some(previous_angle), Some(angle_deg)) =
+                        (self.touch_gestures.angle_deg, snapshot.angle_deg)
+                    {
+                        self.emit_window_event(
+                            app,
+                            event::WindowEvent::RotationGesture {
+                                device_id,
+                                delta: normalized_angle_delta_deg(previous_angle, angle_deg) as f32,
+                                phase: event::TouchPhase::Moved,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        self.touch_gestures.centroid = snapshot.map(|snapshot| snapshot.centroid);
+        self.touch_gestures.span = snapshot.and_then(|snapshot| snapshot.span);
+        self.touch_gestures.angle_deg = snapshot.and_then(|snapshot| snapshot.angle_deg);
+    }
+
+    fn maybe_emit_double_tap<A: ApplicationHandler>(
+        &mut self,
+        device_id: Option<DeviceId>,
+        position: PhysicalPosition<f64>,
+        event_time: i64,
+        app: &mut A,
+    ) {
+        let is_double_tap = self.last_tap.is_some_and(|tap| {
+            tap.device_id == device_id
+                && event_time.saturating_sub(tap.time_ns) <= DOUBLE_TAP_TIMEOUT_NS
+                && squared_distance(tap.position, position) <= TAP_SLOP_PX * TAP_SLOP_PX
+        });
+        if is_double_tap {
+            self.emit_window_event(app, event::WindowEvent::DoubleTapGesture { device_id });
+            self.last_tap = None;
+        }
+    }
+
+    fn record_tap(
+        &mut self,
+        device_id: Option<DeviceId>,
+        finger_id: FingerId,
+        position: PhysicalPosition<f64>,
+        event_time: i64,
+    ) {
+        let Some(contact) = self.touch_contacts.get(&finger_id) else {
+            self.last_tap = None;
+            return;
+        };
+        if squared_distance(contact.start_position, position) > TAP_SLOP_PX * TAP_SLOP_PX {
+            self.last_tap = None;
+            return;
+        }
+        self.last_tap = Some(TapRecord { device_id, position, time_ns: event_time });
     }
 
     pub fn run_app_on_demand<A: ApplicationHandler>(
@@ -788,6 +1324,10 @@ impl Window {
         self.app.content_rect()
     }
 
+    pub(crate) fn android_app(&self) -> AndroidApp {
+        self.app.clone()
+    }
+
     // Allow the usage of HasRawWindowHandle inside this function
     #[allow(deprecated)]
     fn raw_window_handle_rwh_06(&self) -> Result<rwh_06::RawWindowHandle, rwh_06::HandleError> {
@@ -954,6 +1494,8 @@ impl CoreWindow for Window {
                     return Err(ImeRequestError::AlreadyEnabled);
                 }
                 *current_caps = Some(capabilities);
+                #[cfg(feature = "game-activity")]
+                self.app.set_text_input_state(android_activity::input::TextInputState::default());
                 self.app.show_soft_input(true);
             },
             ImeRequest::Update(_) => {
@@ -963,6 +1505,8 @@ impl CoreWindow for Window {
             },
             ImeRequest::Disable => {
                 *current_caps = None;
+                #[cfg(feature = "game-activity")]
+                self.app.set_text_input_state(android_activity::input::TextInputState::default());
                 self.app.hide_soft_input(true);
             },
         }
@@ -1044,4 +1588,219 @@ fn screen_size(app: &AndroidApp) -> PhysicalSize<u32> {
 
 fn scale_factor(app: &AndroidApp) -> f64 {
     app.config().density().map(|dpi| dpi as f64 / 160.0).unwrap_or(1.0)
+}
+
+#[derive(Clone, Debug)]
+struct AndroidPointerState {
+    kind: event::PointerKind,
+    source: AndroidPointerSource,
+}
+
+#[derive(Clone, Debug)]
+enum AndroidPointerSource {
+    Mouse,
+    Touch { finger_id: FingerId, force: Option<Force> },
+    Tablet { kind: event::TabletToolKind, data: event::TabletToolData },
+    Unknown,
+}
+
+impl AndroidPointerState {
+    fn pointer_source(&self) -> event::PointerSource {
+        match &self.source {
+            AndroidPointerSource::Mouse => event::PointerSource::Mouse,
+            AndroidPointerSource::Touch { finger_id, force } => {
+                event::PointerSource::Touch { finger_id: *finger_id, force: *force }
+            },
+            AndroidPointerSource::Tablet { kind, data } => {
+                event::PointerSource::TabletTool { kind: *kind, data: data.clone() }
+            },
+            AndroidPointerSource::Unknown => event::PointerSource::Unknown,
+        }
+    }
+
+    fn contact_button(&self) -> event::ButtonSource {
+        match &self.source {
+            AndroidPointerSource::Mouse => event::ButtonSource::Mouse(event::MouseButton::Left),
+            AndroidPointerSource::Touch { finger_id, force } => {
+                event::ButtonSource::Touch { finger_id: *finger_id, force: *force }
+            },
+            AndroidPointerSource::Tablet { kind, data } => event::ButtonSource::TabletTool {
+                kind: *kind,
+                button: event::TabletToolButton::Contact,
+                data: data.clone(),
+            },
+            AndroidPointerSource::Unknown => event::ButtonSource::Unknown(0),
+        }
+    }
+}
+
+fn android_pointer_state(
+    source: Source,
+    tool_type: ToolType,
+    finger_id: FingerId,
+    pointer: &android_activity::input::Pointer<'_>,
+) -> Option<AndroidPointerState> {
+    let force = Some(Force::Normalized(pointer.pressure() as f64));
+    let tablet_data = event::TabletToolData {
+        force,
+        tangential_force: None,
+        twist: None,
+        tilt: None,
+        angle: None,
+    };
+
+    let kind = match source {
+        Source::Mouse | Source::MouseRelative | Source::Touchpad | Source::Trackball => {
+            AndroidPointerState {
+                kind: event::PointerKind::Mouse,
+                source: AndroidPointerSource::Mouse,
+            }
+        },
+        Source::Stylus | Source::BluetoothStylus => {
+            let kind = tablet_tool_kind(tool_type);
+            AndroidPointerState {
+                kind: event::PointerKind::TabletTool(kind),
+                source: AndroidPointerSource::Tablet { kind, data: tablet_data },
+            }
+        },
+        Source::Touchscreen => match tool_type {
+            ToolType::Finger => AndroidPointerState {
+                kind: event::PointerKind::Touch(finger_id),
+                source: AndroidPointerSource::Touch { finger_id, force },
+            },
+            ToolType::Stylus | ToolType::Eraser => {
+                let kind = tablet_tool_kind(tool_type);
+                AndroidPointerState {
+                    kind: event::PointerKind::TabletTool(kind),
+                    source: AndroidPointerSource::Tablet { kind, data: tablet_data },
+                }
+            },
+            ToolType::Mouse => AndroidPointerState {
+                kind: event::PointerKind::Mouse,
+                source: AndroidPointerSource::Mouse,
+            },
+            ToolType::Palm => return None,
+            _ => AndroidPointerState {
+                kind: event::PointerKind::Unknown,
+                source: AndroidPointerSource::Unknown,
+            },
+        },
+        _ => match tool_type {
+            ToolType::Finger => AndroidPointerState {
+                kind: event::PointerKind::Touch(finger_id),
+                source: AndroidPointerSource::Touch { finger_id, force },
+            },
+            ToolType::Stylus | ToolType::Eraser => {
+                let kind = tablet_tool_kind(tool_type);
+                AndroidPointerState {
+                    kind: event::PointerKind::TabletTool(kind),
+                    source: AndroidPointerSource::Tablet { kind, data: tablet_data },
+                }
+            },
+            ToolType::Mouse => AndroidPointerState {
+                kind: event::PointerKind::Mouse,
+                source: AndroidPointerSource::Mouse,
+            },
+            ToolType::Palm => return None,
+            _ => AndroidPointerState {
+                kind: event::PointerKind::Unknown,
+                source: AndroidPointerSource::Unknown,
+            },
+        },
+    };
+
+    Some(kind)
+}
+
+fn action_button_source(
+    button: Button,
+    pointer_state: &AndroidPointerState,
+) -> Option<event::ButtonSource> {
+    match &pointer_state.source {
+        AndroidPointerSource::Mouse => mouse_button(button).map(event::ButtonSource::Mouse),
+        AndroidPointerSource::Tablet { kind, data } => tablet_tool_button(button).map(|button| {
+            event::ButtonSource::TabletTool { kind: *kind, button, data: data.clone() }
+        }),
+        AndroidPointerSource::Touch { .. } => None,
+        AndroidPointerSource::Unknown => None,
+    }
+}
+
+fn mouse_button(button: Button) -> Option<event::MouseButton> {
+    Some(match button {
+        Button::Primary => event::MouseButton::Left,
+        Button::Secondary => event::MouseButton::Right,
+        Button::Tertiary => event::MouseButton::Middle,
+        Button::Back => event::MouseButton::Back,
+        Button::Forward => event::MouseButton::Forward,
+        _ => return None,
+    })
+}
+
+fn tablet_tool_button(button: Button) -> Option<event::TabletToolButton> {
+    Some(match button {
+        Button::Primary => event::TabletToolButton::Contact,
+        Button::Secondary | Button::StylusPrimary => event::TabletToolButton::Barrel,
+        Button::Tertiary => event::TabletToolButton::Other(1),
+        Button::StylusSecondary => event::TabletToolButton::Other(2),
+        Button::Back => event::TabletToolButton::Other(3),
+        Button::Forward => event::TabletToolButton::Other(4),
+        _ => return None,
+    })
+}
+
+fn tablet_tool_kind(tool_type: ToolType) -> event::TabletToolKind {
+    match tool_type {
+        ToolType::Eraser => event::TabletToolKind::Eraser,
+        _ => event::TabletToolKind::Pen,
+    }
+}
+
+fn pointer_position(pointer: &android_activity::input::Pointer<'_>) -> PhysicalPosition<f64> {
+    PhysicalPosition::new(pointer.x() as f64, pointer.y() as f64)
+}
+
+fn touch_snapshot(touch_contacts: &HashMap<FingerId, TouchContact>) -> Option<TouchSnapshot> {
+    if touch_contacts.is_empty() {
+        return None;
+    }
+
+    let count = touch_contacts.len();
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    for contact in touch_contacts.values() {
+        sum_x += contact.position.x;
+        sum_y += contact.position.y;
+    }
+    let centroid = PhysicalPosition::new(sum_x / count as f64, sum_y / count as f64);
+
+    let (span, angle_deg) = if count == 2 {
+        let mut contacts: Vec<_> = touch_contacts.iter().collect();
+        contacts.sort_by_key(|(finger_id, _)| finger_id.into_raw());
+        let [(_, first), (_, second)] = contacts.as_slice() else { unreachable!() };
+        let dx = second.position.x - first.position.x;
+        let dy = second.position.y - first.position.y;
+        (Some((dx * dx + dy * dy).sqrt()), Some(dy.atan2(dx).to_degrees()))
+    } else {
+        (None, None)
+    };
+
+    Some(TouchSnapshot { count, centroid, span, angle_deg })
+}
+
+fn normalized_angle_delta_deg(previous: f64, current: f64) -> f64 {
+    let mut delta = current - previous;
+    while delta > 180.0 {
+        delta -= 360.0;
+    }
+    while delta < -180.0 {
+        delta += 360.0;
+    }
+    delta
+}
+
+fn squared_distance(a: PhysicalPosition<f64>, b: PhysicalPosition<f64>) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx * dx + dy * dy
 }

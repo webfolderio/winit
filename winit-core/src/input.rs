@@ -27,15 +27,9 @@ pub struct PointerInputEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PointerInputAction {
     Entered,
-    Moved {
-        source: PointerSource,
-    },
-    Pressed {
-        button: ButtonSource,
-    },
-    Released {
-        button: ButtonSource,
-    },
+    Moved { source: PointerSource },
+    Pressed { button: ButtonSource },
+    Released { button: ButtonSource },
     Left,
     Cancelled,
 }
@@ -51,24 +45,10 @@ pub struct ScrollInputEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GestureInputEvent {
-    Pan {
-        device_id: Option<DeviceId>,
-        delta: PhysicalPosition<f32>,
-        phase: TouchPhase,
-    },
-    Pinch {
-        device_id: Option<DeviceId>,
-        delta: f64,
-        phase: TouchPhase,
-    },
-    Rotation {
-        device_id: Option<DeviceId>,
-        delta: f32,
-        phase: TouchPhase,
-    },
-    DoubleTap {
-        device_id: Option<DeviceId>,
-    },
+    Pan { device_id: Option<DeviceId>, delta: PhysicalPosition<f32>, phase: TouchPhase },
+    Pinch { device_id: Option<DeviceId>, delta: f64, phase: TouchPhase },
+    Rotation { device_id: Option<DeviceId>, delta: f32, phase: TouchPhase },
+    DoubleTap { device_id: Option<DeviceId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -76,10 +56,7 @@ pub enum PointerId {
     Mouse,
     Touch(FingerId),
     TabletTool(PointerKind),
-    Unknown {
-        device_id: Option<DeviceId>,
-        primary: bool,
-    },
+    Unknown { device_id: Option<DeviceId>, primary: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,13 +84,8 @@ impl WindowInputMapper {
         match event {
             WindowEvent::Focused(false) | WindowEvent::Destroyed => {
                 self.cancel_all(emit);
-            }
-            WindowEvent::PointerEntered {
-                device_id,
-                position,
-                primary,
-                kind,
-            } => {
+            },
+            WindowEvent::PointerEntered { device_id, position, primary, kind } => {
                 let pointer_id = PointerId::from_kind(*kind, *device_id, *primary);
                 self.pointers.insert(
                     pointer_id,
@@ -133,13 +105,8 @@ impl WindowInputMapper {
                     kind: *kind,
                     action: PointerInputAction::Entered,
                 }));
-            }
-            WindowEvent::PointerMoved {
-                device_id,
-                position,
-                primary,
-                source,
-            } => {
+            },
+            WindowEvent::PointerMoved { device_id, position, primary, source } => {
                 let pointer_id = PointerId::from_source(source, *device_id, *primary);
                 let kind = PointerKind::from(source.clone());
                 self.pointers
@@ -163,18 +130,10 @@ impl WindowInputMapper {
                     position: Some(*position),
                     primary: *primary,
                     kind,
-                    action: PointerInputAction::Moved {
-                        source: source.clone(),
-                    },
+                    action: PointerInputAction::Moved { source: source.clone() },
                 }));
-            }
-            WindowEvent::PointerButton {
-                device_id,
-                state,
-                position,
-                primary,
-                button,
-            } => {
+            },
+            WindowEvent::PointerButton { device_id, state, position, primary, button } => {
                 let pointer_id = PointerId::from_button(button, *device_id, *primary);
                 let kind = button.pointer_kind();
                 let button_id = ButtonId::from_button_source(button);
@@ -190,10 +149,12 @@ impl WindowInputMapper {
                                 if !pointer_state.pressed_buttons.contains(&button_id) {
                                     pointer_state.pressed_buttons.push(button_id);
                                 }
-                            }
+                            },
                             ElementState::Released => {
-                                pointer_state.pressed_buttons.retain(|pressed| pressed != &button_id);
-                            }
+                                pointer_state
+                                    .pressed_buttons
+                                    .retain(|pressed| pressed != &button_id);
+                            },
                         }
                     })
                     .or_insert(PointerState {
@@ -213,30 +174,27 @@ impl WindowInputMapper {
                     primary: *primary,
                     kind,
                     action: match state {
-                        ElementState::Pressed => PointerInputAction::Pressed {
-                            button: button.clone(),
+                        ElementState::Pressed => {
+                            PointerInputAction::Pressed { button: button.clone() }
                         },
-                        ElementState::Released => PointerInputAction::Released {
-                            button: button.clone(),
+                        ElementState::Released => {
+                            PointerInputAction::Released { button: button.clone() }
                         },
                     },
                 }));
-            }
-            WindowEvent::PointerLeft {
-                device_id,
-                position,
-                primary,
-                kind,
-            } => {
+            },
+            WindowEvent::PointerLeft { device_id, position, primary, kind } => {
                 let pointer_id = PointerId::from_kind(*kind, *device_id, *primary);
                 let state = self.pointers.remove(&pointer_id);
-                let action = if state
-                    .as_ref()
-                    .is_some_and(|state| {
-                        !state.pressed_buttons.is_empty()
-                            && matches!(kind, PointerKind::Touch(_) | PointerKind::TabletTool(_) | PointerKind::Unknown)
-                    })
-                {
+                let action = if state.as_ref().is_some_and(|state| {
+                    !state.pressed_buttons.is_empty()
+                        && matches!(
+                            kind,
+                            PointerKind::Touch(_)
+                                | PointerKind::TabletTool(_)
+                                | PointerKind::Unknown
+                        )
+                }) {
                     PointerInputAction::Cancelled
                 } else {
                     PointerInputAction::Left
@@ -250,12 +208,8 @@ impl WindowInputMapper {
                     kind: *kind,
                     action,
                 }));
-            }
-            WindowEvent::MouseWheel {
-                device_id,
-                delta,
-                phase,
-            } => {
+            },
+            WindowEvent::MouseWheel { device_id, delta, phase } => {
                 emit(WindowInputEvent::Scroll(ScrollInputEvent {
                     device_id: *device_id,
                     position: self.mouse_position(),
@@ -263,56 +217,34 @@ impl WindowInputMapper {
                     phase: *phase,
                     source: ScrollSource::Wheel,
                 }));
-            }
-            WindowEvent::PanGesture {
-                device_id,
-                delta,
-                phase,
-            } => {
-                emit(WindowInputEvent::Scroll(ScrollInputEvent {
-                    device_id: *device_id,
-                    position: self.touch_centroid(),
-                    delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(
-                        f64::from(delta.x),
-                        f64::from(delta.y),
-                    )),
-                    phase: *phase,
-                    source: ScrollSource::Gesture,
-                }));
+            },
+            WindowEvent::PanGesture { device_id, delta, phase } => {
                 emit(WindowInputEvent::Gesture(GestureInputEvent::Pan {
                     device_id: *device_id,
                     delta: *delta,
                     phase: *phase,
                 }));
-            }
-            WindowEvent::PinchGesture {
-                device_id,
-                delta,
-                phase,
-            } => {
+            },
+            WindowEvent::PinchGesture { device_id, delta, phase } => {
                 emit(WindowInputEvent::Gesture(GestureInputEvent::Pinch {
                     device_id: *device_id,
                     delta: *delta,
                     phase: *phase,
                 }));
-            }
-            WindowEvent::RotationGesture {
-                device_id,
-                delta,
-                phase,
-            } => {
+            },
+            WindowEvent::RotationGesture { device_id, delta, phase } => {
                 emit(WindowInputEvent::Gesture(GestureInputEvent::Rotation {
                     device_id: *device_id,
                     delta: *delta,
                     phase: *phase,
                 }));
-            }
+            },
             WindowEvent::DoubleTapGesture { device_id } => {
                 emit(WindowInputEvent::Gesture(GestureInputEvent::DoubleTap {
                     device_id: *device_id,
                 }));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -342,10 +274,7 @@ impl WindowInputMapper {
     }
 
     pub fn touch_contact_count(&self) -> usize {
-        self.pointers
-            .values()
-            .filter(|state| matches!(state.kind, PointerKind::Touch(_)))
-            .count()
+        self.pointers.values().filter(|state| matches!(state.kind, PointerKind::Touch(_))).count()
     }
 
     fn shrink_pointer_storage_if_sparse(&mut self) {
@@ -355,30 +284,7 @@ impl WindowInputMapper {
     }
 
     fn mouse_position(&self) -> Option<PhysicalPosition<f64>> {
-        self.pointers
-            .get(&PointerId::Mouse)
-            .and_then(|state| state.last_position)
-    }
-
-    fn touch_centroid(&self) -> Option<PhysicalPosition<f64>> {
-        let mut count = 0usize;
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-
-        for state in self
-            .pointers
-            .values()
-            .filter(|state| matches!(state.kind, PointerKind::Touch(_)))
-        {
-            let Some(position) = state.last_position else {
-                continue;
-            };
-            count += 1;
-            sum_x += position.x;
-            sum_y += position.y;
-        }
-
-        (count > 0).then_some(PhysicalPosition::new(sum_x / count as f64, sum_y / count as f64))
+        self.pointers.get(&PointerId::Mouse).and_then(|state| state.last_position)
     }
 }
 
@@ -395,10 +301,7 @@ struct PointerState {
 enum ButtonId {
     Mouse(crate::event::MouseButton),
     Touch(FingerId),
-    TabletTool {
-        kind: crate::event::TabletToolKind,
-        button: crate::event::TabletToolButton,
-    },
+    TabletTool { kind: crate::event::TabletToolKind, button: crate::event::TabletToolButton },
     Unknown(u16),
 }
 
@@ -416,7 +319,9 @@ impl PointerId {
         match source {
             PointerSource::Mouse => Self::Mouse,
             PointerSource::Touch { finger_id, .. } => Self::Touch(*finger_id),
-            PointerSource::TabletTool { kind, .. } => Self::TabletTool(PointerKind::TabletTool(*kind)),
+            PointerSource::TabletTool { kind, .. } => {
+                Self::TabletTool(PointerKind::TabletTool(*kind))
+            },
             PointerSource::Unknown => Self::Unknown { device_id, primary },
         }
     }
@@ -425,7 +330,9 @@ impl PointerId {
         match button {
             ButtonSource::Mouse(_) => Self::Mouse,
             ButtonSource::Touch { finger_id, .. } => Self::Touch(*finger_id),
-            ButtonSource::TabletTool { kind, .. } => Self::TabletTool(PointerKind::TabletTool(*kind)),
+            ButtonSource::TabletTool { kind, .. } => {
+                Self::TabletTool(PointerKind::TabletTool(*kind))
+            },
             ButtonSource::Unknown(_) => Self::Unknown { device_id, primary },
         }
     }
@@ -447,9 +354,8 @@ impl ButtonId {
         match button {
             ButtonSource::Mouse(mouse_button) => Self::Mouse(*mouse_button),
             ButtonSource::Touch { finger_id, .. } => Self::Touch(*finger_id),
-            ButtonSource::TabletTool { kind, button, .. } => Self::TabletTool {
-                kind: *kind,
-                button: *button,
+            ButtonSource::TabletTool { kind, button, .. } => {
+                Self::TabletTool { kind: *kind, button: *button }
             },
             ButtonSource::Unknown(button) => Self::Unknown(*button),
         }
@@ -488,10 +394,7 @@ mod tests {
                 state: ElementState::Pressed,
                 position: PhysicalPosition::new(10.0, 20.0),
                 primary: true,
-                button: ButtonSource::Touch {
-                    finger_id,
-                    force: Some(Force::Normalized(0.5)),
-                },
+                button: ButtonSource::Touch { finger_id, force: Some(Force::Normalized(0.5)) },
             },
         );
 
@@ -561,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn pan_gesture_scroll_uses_touch_centroid() {
+    fn pan_gesture_emits_only_pan_gesture() {
         let mut mapper = WindowInputMapper::new();
         let first = FingerId::from_raw(1);
         let second = FingerId::from_raw(2);
@@ -596,11 +499,12 @@ mod tests {
 
         assert!(matches!(
             &events[0],
-            WindowInputEvent::Scroll(ScrollInputEvent {
-                position: Some(position),
-                source: ScrollSource::Gesture,
+            WindowInputEvent::Gesture(GestureInputEvent::Pan {
+                delta,
+                phase: TouchPhase::Moved,
                 ..
-            }) if *position == PhysicalPosition::new(20.0, 30.0)
+            }) if *delta == PhysicalPosition::new(0.0, 12.0)
         ));
+        assert_eq!(events.len(), 1);
     }
 }
