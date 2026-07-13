@@ -107,12 +107,18 @@ impl RedrawRequester {
 }
 
 const DOUBLE_TAP_TIMEOUT_NS: i64 = 300_000_000;
-const TAP_SLOP_PX: f64 = 48.0;
+const TAP_MAX_DURATION_NS: i64 = 500_000_000;
+// Android motion coordinates are physical pixels, so gesture tolerances must follow density.
+const TAP_MOVEMENT_SLOP_DP: f64 = 12.0;
+const DOUBLE_TAP_SLOP_DP: f64 = 48.0;
 
 #[derive(Clone, Copy, Debug)]
 struct TouchContact {
+    device_id: Option<DeviceId>,
     start_position: PhysicalPosition<f64>,
     position: PhysicalPosition<f64>,
+    start_time_ns: i64,
+    tap_eligible: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -152,6 +158,8 @@ pub struct EventLoop {
     touch_contacts: HashMap<FingerId, TouchContact>,
     touch_gestures: TouchGestureState,
     last_tap: Option<TapRecord>,
+    pending_double_tap: Option<FingerId>,
+    display_scale_factor: f64,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
 }
@@ -186,6 +194,7 @@ impl EventLoop {
         let event_loop_proxy = Arc::new(EventLoopProxy::new(android_app.create_waker()));
 
         let redraw_flag = SharedFlag::new();
+        let display_scale_factor = scale_factor(android_app);
 
         Ok(Self {
             android_app: android_app.clone(),
@@ -193,6 +202,8 @@ impl EventLoop {
             touch_contacts: HashMap::new(),
             touch_gestures: TouchGestureState::default(),
             last_tap: None,
+            pending_double_tap: None,
+            display_scale_factor,
             window_target: ActiveEventLoop {
                 app: android_app.clone(),
                 control_flow: Cell::new(ControlFlow::default()),
@@ -235,6 +246,7 @@ impl EventLoop {
                     app.can_create_surfaces(&self.window_target);
                 },
                 MainEvent::TerminateWindow { .. } => {
+                    self.cancel_touch_tracking(app);
                     app.destroy_surfaces(&self.window_target);
                 },
                 MainEvent::WindowResized { .. } => resized = true,
@@ -249,13 +261,15 @@ impl EventLoop {
                 },
                 MainEvent::LostFocus => {
                     HAS_FOCUS.store(false, Ordering::Relaxed);
+                    self.cancel_touch_tracking(app);
                     let event = event::WindowEvent::Focused(false);
                     app.window_event(&self.window_target, GLOBAL_WINDOW, event);
                 },
                 MainEvent::ConfigChanged { .. } => {
-                    let old_scale_factor = scale_factor(&self.android_app);
+                    self.invalidate_tap_tracking();
                     let scale_factor = scale_factor(&self.android_app);
-                    if (scale_factor - old_scale_factor).abs() < f64::EPSILON {
+                    if (scale_factor - self.display_scale_factor).abs() > f64::EPSILON {
+                        self.display_scale_factor = scale_factor;
                         let new_surface_size = Arc::new(Mutex::new(screen_size(&self.android_app)));
                         let event = event::WindowEvent::ScaleFactorChanged {
                             surface_size_writer: SurfaceSizeWriter::new(Arc::downgrade(
@@ -385,7 +399,7 @@ impl EventLoop {
                         self.handle_motion_move(motion_event, device_id, app);
                     },
                     MotionAction::Up | MotionAction::PointerUp => {
-                        self.handle_contact_up(motion_event, device_id, action, app);
+                        self.handle_contact_up(motion_event, device_id, app);
                     },
                     MotionAction::Cancel => {
                         self.handle_motion_cancel(motion_event, device_id, app);
@@ -578,12 +592,25 @@ impl EventLoop {
         let primary = match pointer_state.kind {
             event::PointerKind::Touch(_) => {
                 let primary = action == MotionAction::Down;
+                let tap_eligible = primary && self.touch_contacts.is_empty();
                 if primary {
                     self.primary_pointer = Some(finger_id);
-                    self.maybe_emit_double_tap(device_id, position, motion_event.event_time(), app);
                 }
-                self.touch_contacts
-                    .insert(finger_id, TouchContact { start_position: position, position });
+                if tap_eligible {
+                    self.begin_tap(device_id, finger_id, position, motion_event.event_time());
+                } else {
+                    self.invalidate_tap_tracking();
+                }
+                self.touch_contacts.insert(
+                    finger_id,
+                    TouchContact {
+                        device_id,
+                        start_position: position,
+                        position,
+                        start_time_ns: motion_event.event_time(),
+                        tap_eligible,
+                    },
+                );
                 primary
             },
             _ => true,
@@ -638,8 +665,17 @@ impl EventLoop {
                 if let Some(contact) = self.touch_contacts.get_mut(&finger_id) {
                     contact.position = position;
                 } else {
-                    self.touch_contacts
-                        .insert(finger_id, TouchContact { start_position: position, position });
+                    self.touch_contacts.insert(
+                        finger_id,
+                        TouchContact {
+                            device_id,
+                            start_position: position,
+                            position,
+                            start_time_ns: motion_event.event_time(),
+                            tap_eligible: false,
+                        },
+                    );
+                    self.invalidate_tap_tracking();
                 }
                 touched = true;
             }
@@ -669,7 +705,6 @@ impl EventLoop {
         &mut self,
         motion_event: &android_activity::input::MotionEvent<'_>,
         device_id: Option<DeviceId>,
-        action: MotionAction,
         app: &mut A,
     ) {
         let pointer = motion_event.pointer_at_index(motion_event.pointer_index());
@@ -681,15 +716,15 @@ impl EventLoop {
             return;
         };
 
+        let mut double_tap = false;
         let primary = match pointer_state.kind {
             event::PointerKind::Touch(_) => {
-                let primary = action == MotionAction::Up || self.primary_pointer == Some(finger_id);
+                let primary = self.primary_pointer == Some(finger_id);
                 if primary {
                     self.primary_pointer = None;
                 }
-                if self.touch_contacts.len() == 1 {
-                    self.record_tap(device_id, finger_id, position, motion_event.event_time());
-                }
+                double_tap =
+                    self.complete_tap(device_id, finger_id, position, motion_event.event_time());
                 self.touch_contacts.remove(&finger_id);
                 primary
             },
@@ -716,6 +751,10 @@ impl EventLoop {
             },
         );
 
+        if double_tap {
+            self.emit_window_event(app, event::WindowEvent::DoubleTapGesture { device_id });
+        }
+
         if matches!(pointer_state.kind, event::PointerKind::Touch(_)) {
             self.sync_touch_gestures(device_id, false, false, app);
         }
@@ -727,8 +766,6 @@ impl EventLoop {
         device_id: Option<DeviceId>,
         app: &mut A,
     ) {
-        let mut touched = false;
-
         for pointer in motion_event.pointers() {
             let position = pointer_position(&pointer);
             let finger_id = FingerId::from_raw(pointer.pointer_id() as usize);
@@ -741,29 +778,24 @@ impl EventLoop {
                 continue;
             };
 
-            let primary = match pointer_state.kind {
-                event::PointerKind::Touch(_) => {
-                    let primary = self.primary_pointer == Some(finger_id);
-                    self.touch_contacts.remove(&finger_id);
-                    touched = true;
-                    primary
-                },
-                _ => true,
-            };
+            if matches!(pointer_state.kind, event::PointerKind::Touch(_)) {
+                continue;
+            }
 
             self.emit_window_event(
                 app,
                 event::WindowEvent::PointerLeft {
                     device_id,
-                    primary,
+                    primary: true,
                     position: Some(position),
                     kind: pointer_state.kind,
                 },
             );
         }
 
-        self.primary_pointer = None;
-        if touched {
+        let touched = self.emit_tracked_touch_cancellations(app);
+        self.invalidate_tap_tracking();
+        if touched || self.touch_gestures.pan_active || self.touch_gestures.transform_active {
             self.sync_touch_gestures(device_id, false, true, app);
         }
     }
@@ -1013,40 +1045,90 @@ impl EventLoop {
         self.touch_gestures.angle_deg = snapshot.and_then(|snapshot| snapshot.angle_deg);
     }
 
-    fn maybe_emit_double_tap<A: ApplicationHandler>(
-        &mut self,
-        device_id: Option<DeviceId>,
-        position: PhysicalPosition<f64>,
-        event_time: i64,
-        app: &mut A,
-    ) {
-        let is_double_tap = self.last_tap.is_some_and(|tap| {
-            tap.device_id == device_id
-                && event_time.saturating_sub(tap.time_ns) <= DOUBLE_TAP_TIMEOUT_NS
-                && squared_distance(tap.position, position) <= TAP_SLOP_PX * TAP_SLOP_PX
-        });
-        if is_double_tap {
-            self.emit_window_event(app, event::WindowEvent::DoubleTapGesture { device_id });
-            self.last_tap = None;
-        }
-    }
-
-    fn record_tap(
+    fn begin_tap(
         &mut self,
         device_id: Option<DeviceId>,
         finger_id: FingerId,
         position: PhysicalPosition<f64>,
         event_time: i64,
     ) {
+        let is_double_tap = self.last_tap.take().is_some_and(|tap| {
+            is_double_tap_candidate(tap, device_id, position, event_time, self.display_scale_factor)
+        });
+        self.pending_double_tap = is_double_tap.then_some(finger_id);
+    }
+
+    fn complete_tap(
+        &mut self,
+        device_id: Option<DeviceId>,
+        finger_id: FingerId,
+        position: PhysicalPosition<f64>,
+        event_time: i64,
+    ) -> bool {
         let Some(contact) = self.touch_contacts.get(&finger_id) else {
-            self.last_tap = None;
-            return;
+            self.invalidate_tap_tracking();
+            return false;
         };
-        if squared_distance(contact.start_position, position) > TAP_SLOP_PX * TAP_SLOP_PX {
+        if !is_completed_tap(contact, position, event_time, self.display_scale_factor) {
+            self.invalidate_tap_tracking();
+            return false;
+        }
+        if self.pending_double_tap.take() == Some(finger_id) {
             self.last_tap = None;
-            return;
+            return true;
         }
         self.last_tap = Some(TapRecord { device_id, position, time_ns: event_time });
+        false
+    }
+
+    fn invalidate_tap_tracking(&mut self) {
+        self.last_tap = None;
+        self.pending_double_tap = None;
+        for contact in self.touch_contacts.values_mut() {
+            contact.tap_eligible = false;
+        }
+    }
+
+    fn cancel_touch_tracking<A: ApplicationHandler>(&mut self, app: &mut A) {
+        self.emit_tracked_touch_cancellations(app);
+        if self.touch_gestures.pan_active || self.touch_gestures.transform_active {
+            self.sync_touch_gestures(None, false, true, app);
+        }
+        self.touch_gestures = TouchGestureState::default();
+        self.invalidate_tap_tracking();
+    }
+
+    fn emit_tracked_touch_cancellations<A: ApplicationHandler>(&mut self, app: &mut A) -> bool {
+        let primary_pointer = self.primary_pointer.take();
+        let mut contacts = std::mem::take(&mut self.touch_contacts);
+        let touched = !contacts.is_empty();
+        if let Some(finger_id) = primary_pointer
+            && let Some(contact) = contacts.remove(&finger_id)
+        {
+            self.emit_touch_cancellation(finger_id, contact, true, app);
+        }
+        for (finger_id, contact) in contacts {
+            self.emit_touch_cancellation(finger_id, contact, false, app);
+        }
+        touched
+    }
+
+    fn emit_touch_cancellation<A: ApplicationHandler>(
+        &self,
+        finger_id: FingerId,
+        contact: TouchContact,
+        primary: bool,
+        app: &mut A,
+    ) {
+        self.emit_window_event(
+            app,
+            event::WindowEvent::PointerLeft {
+                device_id: contact.device_id,
+                primary,
+                position: Some(contact.position),
+                kind: event::PointerKind::Touch(finger_id),
+            },
+        );
     }
 
     pub fn run_app_on_demand<A: ApplicationHandler>(
@@ -1815,4 +1897,113 @@ fn squared_distance(a: PhysicalPosition<f64>, b: PhysicalPosition<f64>) -> f64 {
     let dx = a.x - b.x;
     let dy = a.y - b.y;
     dx * dx + dy * dy
+}
+
+fn scaled_gesture_distance(distance_dp: f64, scale_factor: f64) -> f64 {
+    let scale_factor =
+        if scale_factor.is_finite() && scale_factor > 0.0 { scale_factor } else { 1.0 };
+    distance_dp * scale_factor
+}
+
+fn is_double_tap_candidate(
+    tap: TapRecord,
+    device_id: Option<DeviceId>,
+    position: PhysicalPosition<f64>,
+    event_time: i64,
+    scale_factor: f64,
+) -> bool {
+    let elapsed = event_time.saturating_sub(tap.time_ns);
+    let slop_px = scaled_gesture_distance(DOUBLE_TAP_SLOP_DP, scale_factor);
+    tap.device_id == device_id
+        && (0..=DOUBLE_TAP_TIMEOUT_NS).contains(&elapsed)
+        && squared_distance(tap.position, position) <= slop_px * slop_px
+}
+
+fn is_completed_tap(
+    contact: &TouchContact,
+    position: PhysicalPosition<f64>,
+    event_time: i64,
+    scale_factor: f64,
+) -> bool {
+    let elapsed = event_time.saturating_sub(contact.start_time_ns);
+    let slop_px = scaled_gesture_distance(TAP_MOVEMENT_SLOP_DP, scale_factor);
+    contact.tap_eligible
+        && (0..=TAP_MAX_DURATION_NS).contains(&elapsed)
+        && squared_distance(contact.start_position, position) <= slop_px * slop_px
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gesture_distance_scales_with_android_density() {
+        assert_eq!(scaled_gesture_distance(12.0, 3.0), 36.0);
+        assert_eq!(scaled_gesture_distance(48.0, 2.5), 120.0);
+    }
+
+    #[test]
+    fn gesture_distance_rejects_invalid_density() {
+        assert_eq!(scaled_gesture_distance(12.0, 0.0), 12.0);
+        assert_eq!(scaled_gesture_distance(12.0, f64::NAN), 12.0);
+    }
+
+    #[test]
+    fn completed_tap_enforces_duration_movement_and_eligibility() {
+        let contact = TouchContact {
+            device_id: None,
+            start_position: PhysicalPosition::new(10.0, 20.0),
+            position: PhysicalPosition::new(10.0, 20.0),
+            start_time_ns: 1_000,
+            tap_eligible: true,
+        };
+
+        assert!(is_completed_tap(
+            &contact,
+            PhysicalPosition::new(21.0, 20.0),
+            1_000 + TAP_MAX_DURATION_NS,
+            1.0,
+        ));
+        assert!(!is_completed_tap(&contact, PhysicalPosition::new(23.0, 20.0), 2_000, 1.0,));
+        assert!(!is_completed_tap(
+            &contact,
+            contact.position,
+            1_000 + TAP_MAX_DURATION_NS + 1,
+            1.0,
+        ));
+        assert!(!is_completed_tap(
+            &TouchContact { tap_eligible: false, ..contact },
+            contact.position,
+            2_000,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn double_tap_candidate_enforces_time_position_and_device() {
+        let tap = TapRecord {
+            device_id: None,
+            position: PhysicalPosition::new(50.0, 50.0),
+            time_ns: 1_000,
+        };
+
+        assert!(is_double_tap_candidate(
+            tap,
+            None,
+            PhysicalPosition::new(97.0, 50.0),
+            1_000 + DOUBLE_TAP_TIMEOUT_NS,
+            1.0,
+        ));
+        assert!(
+            !is_double_tap_candidate(tap, None, PhysicalPosition::new(99.0, 50.0), 2_000, 1.0,)
+        );
+        assert!(!is_double_tap_candidate(tap, None, tap.position, 999, 1.0,));
+        assert!(!is_double_tap_candidate(
+            tap,
+            Some(DeviceId::from_raw(7)),
+            tap.position,
+            2_000,
+            1.0,
+        ));
+    }
 }
