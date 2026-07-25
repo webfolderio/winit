@@ -2106,10 +2106,8 @@ unsafe fn public_window_callback_inner(
                                 },
                             );
                             if pointer_info.pointerType == PT_TOUCH {
-                                if let Some(TouchGestureTransition::Ended) = userdata
-                                    .window_state_lock()
-                                    .touch_gestures
-                                    .end_touch(finger_id)
+                                if let Some(TouchGestureTransition::Ended) =
+                                    userdata.window_state_lock().touch_gestures.end_touch(finger_id)
                                 {
                                     touch_gesture_ended = true;
                                 }
@@ -2137,18 +2135,15 @@ unsafe fn public_window_callback_inner(
                                 match transition {
                                     TouchGestureTransition::Started => {
                                         touch_gesture_started = true;
-                                    }
-                                    TouchGestureTransition::Moved {
-                                        pan_delta,
-                                        pinch_delta,
-                                    } => {
+                                    },
+                                    TouchGestureTransition::Moved { pan_delta, pinch_delta } => {
                                         touch_pan_delta.x += pan_delta.x;
                                         touch_pan_delta.y += pan_delta.y;
                                         touch_pinch_delta += pinch_delta;
-                                    }
+                                    },
                                     TouchGestureTransition::Ended => {
                                         touch_gesture_ended = true;
-                                    }
+                                    },
                                 }
                             }
                         }
@@ -2168,16 +2163,22 @@ unsafe fn public_window_callback_inner(
                 }
 
                 if touch_gesture_started {
-                    userdata.send_window_event(window, WindowEvent::PanGesture {
-                        device_id: None,
-                        delta: PhysicalPosition::new(0.0, 0.0),
-                        phase: TouchPhase::Started,
-                    });
-                    userdata.send_window_event(window, WindowEvent::PinchGesture {
-                        device_id: None,
-                        delta: 0.0,
-                        phase: TouchPhase::Started,
-                    });
+                    userdata.send_window_event(
+                        window,
+                        WindowEvent::PanGesture {
+                            device_id: None,
+                            delta: PhysicalPosition::new(0.0, 0.0),
+                            phase: TouchPhase::Started,
+                        },
+                    );
+                    userdata.send_window_event(
+                        window,
+                        WindowEvent::PinchGesture {
+                            device_id: None,
+                            delta: 0.0,
+                            phase: TouchPhase::Started,
+                        },
+                    );
                 }
 
                 if touch_pan_delta.x != 0.0 || touch_pan_delta.y != 0.0 {
@@ -2192,24 +2193,33 @@ unsafe fn public_window_callback_inner(
                 }
 
                 if touch_pinch_delta != 0.0 {
-                    userdata.send_window_event(window, WindowEvent::PinchGesture {
-                        device_id: None,
-                        delta: touch_pinch_delta,
-                        phase: TouchPhase::Moved,
-                    });
+                    userdata.send_window_event(
+                        window,
+                        WindowEvent::PinchGesture {
+                            device_id: None,
+                            delta: touch_pinch_delta,
+                            phase: TouchPhase::Moved,
+                        },
+                    );
                 }
 
                 if touch_gesture_ended {
-                    userdata.send_window_event(window, WindowEvent::PanGesture {
-                        device_id: None,
-                        delta: PhysicalPosition::new(0.0, 0.0),
-                        phase: TouchPhase::Ended,
-                    });
-                    userdata.send_window_event(window, WindowEvent::PinchGesture {
-                        device_id: None,
-                        delta: 0.0,
-                        phase: TouchPhase::Ended,
-                    });
+                    userdata.send_window_event(
+                        window,
+                        WindowEvent::PanGesture {
+                            device_id: None,
+                            delta: PhysicalPosition::new(0.0, 0.0),
+                            phase: TouchPhase::Ended,
+                        },
+                    );
+                    userdata.send_window_event(
+                        window,
+                        WindowEvent::PinchGesture {
+                            device_id: None,
+                            delta: 0.0,
+                            phase: TouchPhase::Ended,
+                        },
+                    );
                 }
 
                 unsafe { SkipPointerFrameMessages(pointer_id) };
