@@ -2057,13 +2057,10 @@ unsafe fn public_window_callback_inner(
 
                         if is_down {
                             if pointer_info.pointerType == PT_TOUCH {
-                                if let Some(TouchGestureTransition::Ended) = userdata
+                                userdata
                                     .window_state_lock()
                                     .touch_gestures
-                                    .begin_touch(finger_id, position)
-                                {
-                                    touch_gesture_ended = true;
-                                }
+                                    .begin_touch(finger_id, position);
                             }
                             userdata.send_window_event(
                                 window,

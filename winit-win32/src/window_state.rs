@@ -286,22 +286,17 @@ impl MouseProperties {
 }
 
 impl TouchGestureState {
-    pub fn begin_touch(
-        &mut self,
-        finger_id: FingerId,
-        position: PhysicalPosition<f64>,
-    ) -> Option<TouchGestureTransition> {
+    /// A new contact can only start or rebase a gesture, never end one.
+    pub fn begin_touch(&mut self, finger_id: FingerId, position: PhysicalPosition<f64>) {
         self.contacts.insert(finger_id, position);
         if self.contacts.len() < 2 {
             self.clear_gesture_state();
-            return None;
+            return;
         }
 
         if self.gesture_active {
             self.rebase_active_gesture();
         }
-
-        None
     }
 
     pub fn update_touch(
