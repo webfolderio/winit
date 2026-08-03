@@ -1094,9 +1094,10 @@ impl EventLoop {
 
         self.pending_redraw |= self.redraw_flag.get_and_reset();
 
-        timeout = if self.running
-            && (self.pending_redraw
-                || self.window_target.event_loop_proxy.wake_up.load(Ordering::Relaxed))
+        // Mirrors the `PollEvent::Wake` filter below: a pending proxy wake up is work to do
+        // whether or not we are running, while a pending redraw only counts while running.
+        timeout = if self.window_target.event_loop_proxy.wake_up.load(Ordering::Relaxed)
+            || (self.running && self.pending_redraw)
         {
             // If we already have work to do then we don't want to block on the next poll
             Some(Duration::ZERO)
@@ -1125,12 +1126,18 @@ impl EventLoop {
                     //
                     // For now, user_events and redraw_requests are the only reasons to expect
                     // a wake up here so we can ignore the wake up if there are no events/requests.
-                    // We also ignore wake ups while suspended.
+                    //
+                    // Proxy wake ups are dispatched even while suspended. `single_iteration`
+                    // keeps every drawing side effect behind its own `self.running` check, so
+                    // running it here only delivers `proxy_wake_up` — background work such as
+                    // terminal output that raises a notification must not be deferred until the
+                    // app resumes. Redraw requests stay suppressed while suspended: there is no
+                    // surface to draw to, and honouring them would spin, because `about_to_wait`
+                    // can request another redraw on every iteration.
                     self.pending_redraw |= self.redraw_flag.get_and_reset();
-                    if !self.running
-                        || (!self.pending_redraw
-                            && !self.window_target.event_loop_proxy.wake_up.load(Ordering::Relaxed))
-                    {
+                    let woken_by_proxy =
+                        self.window_target.event_loop_proxy.wake_up.load(Ordering::Relaxed);
+                    if !woken_by_proxy && !(self.running && self.pending_redraw) {
                         return;
                     }
                 },
