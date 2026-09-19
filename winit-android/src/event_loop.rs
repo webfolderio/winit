@@ -597,6 +597,7 @@ impl EventLoop {
                 state: event::ElementState::Pressed,
                 position,
                 button: pointer_state.contact_button(),
+                is_macos_activation_click: false,
             },
         );
 
@@ -690,6 +691,7 @@ impl EventLoop {
                 state: event::ElementState::Released,
                 position,
                 button: pointer_state.contact_button(),
+                is_macos_activation_click: false,
             },
         );
         self.emit_window_event(
@@ -858,7 +860,14 @@ impl EventLoop {
 
         self.emit_window_event(
             app,
-            event::WindowEvent::PointerButton { device_id, primary: true, state, position, button },
+            event::WindowEvent::PointerButton {
+                device_id,
+                primary: true,
+                state,
+                position,
+                button,
+                is_macos_activation_click: false,
+            },
         );
     }
 
