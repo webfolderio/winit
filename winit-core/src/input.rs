@@ -133,7 +133,7 @@ impl WindowInputMapper {
                     action: PointerInputAction::Moved { source: source.clone() },
                 }));
             },
-            WindowEvent::PointerButton { device_id, state, position, primary, button } => {
+            WindowEvent::PointerButton { device_id, state, position, primary, button, .. } => {
                 let pointer_id = PointerId::from_button(button, *device_id, *primary);
                 let kind = button.pointer_kind();
                 let button_id = ButtonId::from_button_source(button);

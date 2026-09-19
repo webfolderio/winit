@@ -40,24 +40,14 @@ changelog entry.
 
 ## Unreleased
 
-### Added
+### Fixed
 
-- Add `keyboard` support for OpenHarmony.
-- On iOS, add Apple Pencil support with force, altitude, and azimuth data.
-- On Redox, add support for missing keyboard scancodes.
-- Implement `Send` and `Sync` for `OwnedDisplayHandle`.
-- Use new macOS 15 cursors for resize icons.
-- On Android, added scancode conversions for more obscure key codes.
-- On Wayland, added ext-background-effect-v1 support.
+- On Windows, fix a crash occurring when trying to create a DXGI surface on a window that is both fullscreen and always on top.
+- On Wayland, use the touch serial for `Window::drag_window`, `Window::drag_resize_window` and `Window::show_window_menu` when the interaction was started by touch.
+- On Windows, fix a crash when moving a window that owns windows not created by winit, such as native dialogs or application helper windows.
 
 ### Changed
 
-- Updated `windows-sys` to `v0.61`.
-- On older macOS versions (tested up to 12.7.6), applications now receive mouse movement events for unfocused windows, matching the behavior on other platforms.
-
-### Fixed
-
-- On Redox, handle `EINTR` when reading from `event_socket` instead of panicking.
-- On Wayland, switch from using the `ahash` hashing algorithm to `foldhash`.
-- On macOS, fix borderless game presentation options not sticking after switching spaces.
-- On macOS, fix IME being locked on (regardless of requests to disable) after being enabled once.
+- Removed the `url` dependency from `winit-core`, along with `SendData::from_file_paths`,
+  `TypedData::try_as_file_paths` and `impl From<Vec<url::Url>> for SendData`. Use `SendData::Uris`
+  / `TypedData::try_as_uris` with `file:` URIs instead.

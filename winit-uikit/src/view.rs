@@ -577,6 +577,7 @@ impl WinitView {
                             } else {
                                 ButtonSource::Touch { finger_id, force }
                             },
+                            is_macos_activation_click: false,
                         },
                     });
                 },
@@ -638,6 +639,7 @@ impl WinitView {
                                 } else {
                                     ButtonSource::Touch { finger_id, force }
                                 },
+                                is_macos_activation_click: false,
                             },
                         });
                     }
