@@ -1944,23 +1944,20 @@ unsafe fn public_window_callback_inner(
             let y = util::get_y_lparam(lparam as u32) as i32;
             let position = PhysicalPosition::new(x as f64, y as f64);
 
-            userdata.send_window_event(
-                window,
-                PointerButton {
-                    device_id: None,
-                    primary: true,
-                    state: Pressed,
-                    position,
-                    button: match msg {
-                        WM_LBUTTONDOWN => MouseButton::Left,
-                        WM_RBUTTONDOWN => MouseButton::Right,
-                        WM_MBUTTONDOWN => MouseButton::Middle,
-                        _ => unreachable!(),
-                    }
-                    .into(),
-                    is_macos_activation_click: false,
-                },
-            );
+            userdata.send_window_event(window, PointerButton {
+                device_id: None,
+                primary: true,
+                state: Pressed,
+                position,
+                button: match msg {
+                    WM_LBUTTONDOWN => MouseButton::Left,
+                    WM_RBUTTONDOWN => MouseButton::Right,
+                    WM_MBUTTONDOWN => MouseButton::Middle,
+                    _ => unreachable!(),
+                }
+                .into(),
+                is_macos_activation_click: false,
+            });
             result = ProcResult::Value(0);
         },
 
@@ -1977,23 +1974,20 @@ unsafe fn public_window_callback_inner(
             let y = util::get_y_lparam(lparam as u32) as i32;
             let position = PhysicalPosition::new(x as f64, y as f64);
 
-            userdata.send_window_event(
-                window,
-                PointerButton {
-                    device_id: None,
-                    primary: true,
-                    state: Released,
-                    position,
-                    button: match msg {
-                        WM_LBUTTONUP => MouseButton::Left,
-                        WM_RBUTTONUP => MouseButton::Right,
-                        WM_MBUTTONUP => MouseButton::Middle,
-                        _ => unreachable!(),
-                    }
-                    .into(),
-                    is_macos_activation_click: false,
-                },
-            );
+            userdata.send_window_event(window, PointerButton {
+                device_id: None,
+                primary: true,
+                state: Released,
+                position,
+                button: match msg {
+                    WM_LBUTTONUP => MouseButton::Left,
+                    WM_RBUTTONUP => MouseButton::Right,
+                    WM_MBUTTONUP => MouseButton::Middle,
+                    _ => unreachable!(),
+                }
+                .into(),
+                is_macos_activation_click: false,
+            });
             result = ProcResult::Value(0);
         },
 
@@ -2014,18 +2008,15 @@ unsafe fn public_window_callback_inner(
             // 1 is defined as back, 2 as forward; other codes are unexpected.
             let b = xbutton as u8 + MouseButton::Back as u8 - 1;
 
-            userdata.send_window_event(
-                window,
-                PointerButton {
-                    device_id: None,
-                    primary: true,
-                    state: Pressed,
-                    position,
-                    // 1 is defined as back, 2 as forward; other codes are unexpected.
-                    button: MouseButton::try_from_u8(b).unwrap().into(),
-                    is_macos_activation_click: false,
-                },
-            );
+            userdata.send_window_event(window, PointerButton {
+                device_id: None,
+                primary: true,
+                state: Pressed,
+                position,
+                // 1 is defined as back, 2 as forward; other codes are unexpected.
+                button: MouseButton::try_from_u8(b).unwrap().into(),
+                is_macos_activation_click: false,
+            });
             result = ProcResult::Value(0);
         },
 
@@ -2047,18 +2038,15 @@ unsafe fn public_window_callback_inner(
             // 1 is defined as back, 2 as forward; other codes are unexpected.
             let b = xbutton as u8 + MouseButton::Back as u8 - 1;
 
-            userdata.send_window_event(
-                window,
-                PointerButton {
-                    device_id: None,
-                    primary: true,
-                    state: Released,
-                    position,
-                    // 1 is defined as back, 2 as forward; other codes are unexpected.
-                    button: MouseButton::try_from_u8(b).unwrap().into(),
-                    is_macos_activation_click: false,
-                },
-            );
+            userdata.send_window_event(window, PointerButton {
+                device_id: None,
+                primary: true,
+                state: Released,
+                position,
+                // 1 is defined as back, 2 as forward; other codes are unexpected.
+                button: MouseButton::try_from_u8(b).unwrap().into(),
+                is_macos_activation_click: false,
+            });
             result = ProcResult::Value(0);
         },
 
@@ -2111,47 +2099,35 @@ unsafe fn public_window_callback_inner(
                     let primary = util::has_flag(input.dwFlags, TOUCHEVENTF_PRIMARY);
 
                     if util::has_flag(input.dwFlags, TOUCHEVENTF_DOWN) {
-                        userdata.send_window_event(
-                            window,
-                            WindowEvent::PointerEntered {
-                                device_id: None,
-                                primary,
-                                position,
-                                kind: PointerKind::Touch(finger_id),
-                            },
-                        );
-                        userdata.send_window_event(
-                            window,
-                            WindowEvent::PointerButton {
-                                device_id: None,
-                                primary,
-                                state: Pressed,
-                                position,
-                                button: Touch { finger_id, force: None },
-                                is_macos_activation_click: false,
-                            },
-                        );
+                        userdata.send_window_event(window, WindowEvent::PointerEntered {
+                            device_id: None,
+                            primary,
+                            position,
+                            kind: PointerKind::Touch(finger_id),
+                        });
+                        userdata.send_window_event(window, WindowEvent::PointerButton {
+                            device_id: None,
+                            primary,
+                            state: Pressed,
+                            position,
+                            button: Touch { finger_id, force: None },
+                            is_macos_activation_click: false,
+                        });
                     } else if util::has_flag(input.dwFlags, TOUCHEVENTF_UP) {
-                        userdata.send_window_event(
-                            window,
-                            WindowEvent::PointerButton {
-                                device_id: None,
-                                primary,
-                                state: Released,
-                                position,
-                                button: Touch { finger_id, force: None },
-                                is_macos_activation_click: false,
-                            },
-                        );
-                        userdata.send_window_event(
-                            window,
-                            WindowEvent::PointerLeft {
-                                device_id: None,
-                                primary,
-                                position: Some(position),
-                                kind: PointerKind::Touch(finger_id),
-                            },
-                        );
+                        userdata.send_window_event(window, WindowEvent::PointerButton {
+                            device_id: None,
+                            primary,
+                            state: Released,
+                            position,
+                            button: Touch { finger_id, force: None },
+                            is_macos_activation_click: false,
+                        });
+                        userdata.send_window_event(window, WindowEvent::PointerLeft {
+                            device_id: None,
+                            primary,
+                            position: Some(position),
+                            kind: PointerKind::Touch(finger_id),
+                        });
                     } else if util::has_flag(input.dwFlags, TOUCHEVENTF_MOVE) {
                         userdata.send_window_event(
                             window,
@@ -2279,38 +2255,29 @@ unsafe fn public_window_callback_inner(
                                 },
                             );
 
-                            userdata.send_window_event(
-                                window,
-                                WindowEvent::PointerButton {
-                                    device_id: None,
-                                    primary,
-                                    state: Pressed,
-                                    position,
-                                    button,
-                                    is_macos_activation_click: false,
-                                },
-                            );
+                            userdata.send_window_event(window, WindowEvent::PointerButton {
+                                device_id: None,
+                                primary,
+                                state: Pressed,
+                                position,
+                                button,
+                                is_macos_activation_click: false,
+                            });
                         } else {
-                            userdata.send_window_event(
-                                window,
-                                WindowEvent::PointerButton {
-                                    device_id: None,
-                                    primary,
-                                    state: Released,
-                                    position,
-                                    button,
-                                    is_macos_activation_click: false,
-                                },
-                            );
-                            userdata.send_window_event(
-                                window,
-                                WindowEvent::PointerLeft {
-                                    device_id: None,
-                                    primary,
-                                    position: Some(position),
-                                    kind,
-                                },
-                            );
+                            userdata.send_window_event(window, WindowEvent::PointerButton {
+                                device_id: None,
+                                primary,
+                                state: Released,
+                                position,
+                                button,
+                                is_macos_activation_click: false,
+                            });
+                            userdata.send_window_event(window, WindowEvent::PointerLeft {
+                                device_id: None,
+                                primary,
+                                position: Some(position),
+                                kind,
+                            });
                             if pointer_info.pointerType == PT_TOUCH {
                                 if let Some(TouchGestureTransition::Ended) =
                                     userdata.window_state_lock().touch_gestures.end_touch(finger_id)
