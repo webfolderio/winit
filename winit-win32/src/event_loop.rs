@@ -1501,7 +1501,11 @@ unsafe fn public_window_callback_inner(
                 // exists.
                 if !w.window_flags().contains(WindowFlags::MARKER_RETAIN_STATE_ON_SIZE) {
                     let maximized = wparam == SIZE_MAXIMIZED as usize;
+                    let was_maximized = w.window_flags().contains(WindowFlags::MAXIMIZED);
                     w.set_window_flags_in_place(|f| f.set(WindowFlags::MAXIMIZED, maximized));
+                    if maximized != was_maximized {
+                        w.window_flags().apply_undecorated_shadow_frame(window);
+                    }
                 }
             }
 

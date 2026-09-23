@@ -523,8 +523,11 @@ impl WindowFlags {
             return;
         }
 
-        if diff.intersects(WindowFlags::MARKER_DECORATIONS | WindowFlags::MARKER_UNDECORATED_SHADOW)
-        {
+        if diff.intersects(
+            WindowFlags::MARKER_DECORATIONS
+                | WindowFlags::MARKER_UNDECORATED_SHADOW
+                | WindowFlags::MAXIMIZED,
+        ) {
             new.apply_undecorated_shadow_frame(window);
         }
 
@@ -637,11 +640,13 @@ impl WindowFlags {
 
     /// DWM draws an undecorated window's shadow only while it has a frame to hang it from. A 1px
     /// frame extended into the client gives it one, and the window's opaque content covers that
-    /// pixel, so no border shows.
+    /// pixel. Until a resized window is drawn again that pixel is empty and Windows 10 shows the
+    /// frame's light line there, so a maximized window, which has no shadow, keeps no frame.
     pub(crate) fn apply_undecorated_shadow_frame(self, window: HWND) {
         let px = i32::from(
             !self.contains(WindowFlags::MARKER_DECORATIONS)
-                && self.contains(WindowFlags::MARKER_UNDECORATED_SHADOW),
+                && self.contains(WindowFlags::MARKER_UNDECORATED_SHADOW)
+                && !self.contains(WindowFlags::MAXIMIZED),
         );
         let margins =
             MARGINS { cxLeftWidth: px, cxRightWidth: px, cyTopHeight: px, cyBottomHeight: px };
