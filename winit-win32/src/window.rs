@@ -1551,13 +1551,7 @@ impl InitData<'_> {
         let clamped_size = Size::clamp(size, min_size, max_size, win.scale_factor());
         let _ = win.request_surface_size(clamped_size);
 
-        // let margins = MARGINS {
-        //     cxLeftWidth: 1,
-        //     cxRightWidth: 1,
-        //     cyTopHeight: 1,
-        //     cyBottomHeight: 1,
-        // };
-        // dbg!(DwmExtendFrameIntoClientArea(win.hwnd(), &margins as *const _));
+        win.window_state_lock().window_flags.apply_undecorated_shadow_frame(win.hwnd());
 
         if let Some(position) = attributes.position {
             win.set_outer_position(position);

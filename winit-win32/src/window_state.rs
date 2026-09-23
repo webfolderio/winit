@@ -5,7 +5,9 @@ use std::{fmt, io, ptr};
 use bitflags::bitflags;
 use dpi::{PhysicalPosition, PhysicalSize, Size};
 use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows_sys::Win32::Graphics::Gdi::InvalidateRgn;
+use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, EnableMenuItem, GWL_EXSTYLE, GWL_STYLE, GetMenu, GetSystemMenu,
     GetWindowLongW, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOPMOST, MF_BYCOMMAND, MF_DISABLED,
@@ -521,6 +523,11 @@ impl WindowFlags {
             return;
         }
 
+        if diff.intersects(WindowFlags::MARKER_DECORATIONS | WindowFlags::MARKER_UNDECORATED_SHADOW)
+        {
+            new.apply_undecorated_shadow_frame(window);
+        }
+
         if new.contains(WindowFlags::VISIBLE) {
             let flag = if !self.contains(WindowFlags::MARKER_ACTIVATE) {
                 self.set(WindowFlags::MARKER_ACTIVATE, true);
@@ -626,6 +633,19 @@ impl WindowFlags {
                 SendMessageW(window, event_loop::SET_RETAIN_STATE_ON_SIZE_MSG_ID.get(), 0, 0);
             }
         }
+    }
+
+    /// DWM draws an undecorated window's shadow only while it has a frame to hang it from. A 1px
+    /// frame extended into the client gives it one, and the window's opaque content covers that
+    /// pixel, so no border shows.
+    pub(crate) fn apply_undecorated_shadow_frame(self, window: HWND) {
+        let px = i32::from(
+            !self.contains(WindowFlags::MARKER_DECORATIONS)
+                && self.contains(WindowFlags::MARKER_UNDECORATED_SHADOW),
+        );
+        let margins =
+            MARGINS { cxLeftWidth: px, cxRightWidth: px, cyTopHeight: px, cyBottomHeight: px };
+        unsafe { DwmExtendFrameIntoClientArea(window, &margins) };
     }
 
     pub fn adjust_rect(self, hwnd: HWND, mut rect: RECT) -> Result<RECT, io::Error> {
