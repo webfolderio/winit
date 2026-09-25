@@ -26,7 +26,7 @@ use winit_core::event_loop::{
 };
 #[cfg(feature = "game-activity")]
 use winit_core::keyboard::{
-    Key as CoreKey, KeyCode as CoreKeyCode, KeyLocation, NamedKey, PhysicalKey,
+    Key as CoreKey, KeyCode as CoreKeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey,
 };
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
 use winit_core::window::{
@@ -144,6 +144,7 @@ pub struct EventLoop {
     display_scale_factor: f64,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    modifiers: ModifiersState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -198,6 +199,7 @@ impl EventLoop {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            modifiers: ModifiersState::empty(),
         })
     }
 
@@ -414,6 +416,18 @@ impl EventLoop {
                             KeyAction::Up => event::ElementState::Released,
                             _ => event::ElementState::Released,
                         };
+
+                        // Android carries the held modifiers on each key rather than as events
+                        // of their own, so a change is reported before the key it came with.
+                        let modifiers = modifiers_from_meta(key.meta_state());
+                        if modifiers != self.modifiers {
+                            self.modifiers = modifiers;
+                            app.window_event(
+                                &self.window_target,
+                                GLOBAL_WINDOW,
+                                event::WindowEvent::ModifiersChanged(modifiers.into()),
+                            );
+                        }
 
                         let key_char = keycodes::character_map_and_combine_key(
                             android_app,
@@ -1855,4 +1869,13 @@ fn normalized_angle_delta_deg(previous: f64, current: f64) -> f64 {
         delta += 360.0;
     }
     delta
+}
+
+fn modifiers_from_meta(meta: android_activity::input::MetaState) -> ModifiersState {
+    let mut modifiers = ModifiersState::empty();
+    modifiers.set(ModifiersState::SHIFT, meta.shift_on());
+    modifiers.set(ModifiersState::CONTROL, meta.ctrl_on());
+    modifiers.set(ModifiersState::ALT, meta.alt_on());
+    modifiers.set(ModifiersState::META, meta.meta_on());
+    modifiers
 }
