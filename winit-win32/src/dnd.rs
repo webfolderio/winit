@@ -1446,13 +1446,72 @@ static SOURCE_DATA_OBJECT_VTBL: IDataObjectVtbl = IDataObjectVtbl {
     EnumDAdvise: SourceDataObjectData::EnumDAdvise,
 };
 
+/// Drag data given as a COM `IDataObject` the application built itself, for what the
+/// cross-platform types cannot carry, such as files whose contents are only read once dropped
+/// (`CFSTR_FILEDESCRIPTORW` with `CFSTR_FILECONTENTS`). Pass it to `start_drag` as the data.
+#[derive(Debug)]
+pub struct ComDataObject(NonNull<IUnknown>);
+
+// SAFETY: the object is only handed to `DoDragDrop` on the thread that runs the event loop;
+// moving the owned reference there is what `start_drag`'s `Send` bound asks for.
+unsafe impl Send for ComDataObject {}
+
+impl ComDataObject {
+    /// Takes over one reference to an `IDataObject`.
+    ///
+    /// # Safety
+    ///
+    /// `data_object` must point to a live `IDataObject`, and the caller gives up the reference
+    /// it passes.
+    pub unsafe fn from_raw(data_object: *mut c_void) -> Option<Self> {
+        NonNull::new(data_object as *mut IUnknown).map(Self)
+    }
+
+    fn add_ref(&self) -> *mut IUnknown {
+        let this = self.0.as_ptr();
+        unsafe { (vtable(this).AddRef)(this) };
+        this
+    }
+}
+
+impl Drop for ComDataObject {
+    fn drop(&mut self) {
+        let this = self.0.as_ptr();
+        unsafe { (vtable(this).Release)(this) };
+    }
+}
+
+/// The `IUnknown` methods of any COM object: its first field points at its vtable.
+unsafe fn vtable<'a>(this: *mut IUnknown) -> &'a IUnknownVtbl {
+    unsafe { &**(this as *mut *const IUnknownVtbl) }
+}
+
+impl DataTransfer for ComDataObject {
+    fn for_each_available_type<'this>(
+        &'this self,
+        _func: &'_ mut dyn FnMut(&'this dyn TransferType) -> ControlFlow<()>,
+    ) {
+    }
+}
+
+impl DataTransferSend for ComDataObject {
+    fn data_for_type(&self, _type_: &dyn TransferType) -> Option<SendData> {
+        None
+    }
+}
+
+/// The data a drag started here offers: winit's own object over the application's
+/// [`DataTransferSend`], or an `IDataObject` the application built as a [`ComDataObject`].
 pub(crate) struct SourceDataObject {
-    data: *mut SourceDataObjectData,
+    data: *mut IUnknown,
 }
 
 impl SourceDataObject {
     pub(crate) fn new(send_data: Box<dyn DataTransferSend>) -> Self {
-        Self { data: SourceDataObjectData::new_boxed(send_data) }
+        if let Some(object) = send_data.cast_ref::<ComDataObject>() {
+            return Self { data: object.add_ref() };
+        }
+        Self { data: SourceDataObjectData::new_boxed(send_data) as *mut IUnknown }
     }
 
     pub(crate) fn interface_ptr(&self) -> *mut c_void {
@@ -1462,7 +1521,7 @@ impl SourceDataObject {
 
 impl Drop for SourceDataObject {
     fn drop(&mut self) {
-        unsafe { SourceDataObjectData::Release(self.data as *mut IUnknown) };
+        unsafe { (vtable(self.data).Release)(self.data) };
     }
 }
 
